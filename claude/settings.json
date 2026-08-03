@@ -1,0 +1,43 @@
+{
+  "_comment": "ai-devteam ガードレール雛形 — プロジェクトの .claude/settings.json へコピーして使う。git変更操作はオーナーのみが行う(AGENTS.md参照)ため、AIセッションからのgit変更系コマンドを物理的にブロックする。既存のsettings.jsonがある場合はpermissionsをマージすること",
+  "permissions": {
+    "deny": [
+      "Bash(git add:*)",
+      "Bash(git commit)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Bash(git pull)",
+      "Bash(git pull:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git merge:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset:*)",
+      "Bash(git restore:*)",
+      "Bash(git rm:*)",
+      "Bash(git mv:*)",
+      "Bash(git clean:*)",
+      "Bash(git stash)",
+      "Bash(git stash:*)",
+      "Bash(git tag:*)",
+      "Bash(git branch:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(git revert:*)",
+      "Bash(git init)",
+      "Bash(git init:*)",
+      "Bash(git remote:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr merge:*)"
+    ],
+    "allow": [
+      "Bash(git status)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git blame:*)",
+      "Bash(git branch)"
+    ]
+  }
+}
