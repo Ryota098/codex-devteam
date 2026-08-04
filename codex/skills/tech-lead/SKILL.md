@@ -1,3 +1,8 @@
+---
+name: tech-lead
+description: ai-devteamフローのTech Lead役。ユーザーが$tech-leadで明示的に呼んだときのみ使用する。相談資料をもとに技術判断を返す。自動発動しない
+---
+
 <!-- ai-devteam Tech Leadテンプレート -->
 技術的な方針相談をします。
 このセッションでは、以後の指示があるまで以下の役割・ルールを継続してください。

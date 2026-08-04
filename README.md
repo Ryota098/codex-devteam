@@ -8,19 +8,25 @@
 ai-devteam/
 ├── README.md                        # このファイル（運用手順）
 ├── AGENTS.md                        # 各プロジェクトのルートへコピーする共通規約
-├── prompts/                         # Codex用の役割プロンプト（マスター）
-│   ├── pm.md                        # /pm         プロジェクトマネージャー
-│   ├── tech-lead.md                 # /tech-lead  技術判断
-│   ├── implementer.md               # /implementer 実装＋テスト
-│   └── auditor.md                   # /auditor    Codex監査
+├── codex/skills/                    # Codex用の役割Skill（マスター）
+│   ├── pm/SKILL.md                  # $pm          プロジェクトマネージャー
+│   ├── tech-lead/SKILL.md           # $tech-lead   技術判断
+│   ├── implementer/SKILL.md         # $implementer 実装＋テスト
+│   ├── auditor/SKILL.md             # $auditor     Codex監査
+│   └── */agents/openai.yaml         # 暗黙発動の禁止設定（各Skillに同梱）
 ├── claude/skills/auditor/SKILL.md   # Claude Code用の監査Skill（/auditor）
 ├── claude/settings.json             # プロジェクトへコピーするガードレール雛形（git変更操作のdeny）
 └── scripts/install.sh               # ローカル環境への配備スクリプト
 ```
 
-**このリポジトリを `~/.codex/prompts/` へ直接cloneしないこと。**
-あのディレクトリは「1ファイル＝1コマンド」の置き場なので、READMEなども
-コマンド登録されてしまう。マスターはここに置き、install.shでコピーする。
+**このリポジトリを `~/.agents/skills/` へ直接cloneしないこと。**
+マスターはここに置き、install.shでコピーする（Codexの旧custom prompts
+`~/.codex/prompts/` はdeprecatedのため使わない。install.shが残骸を掃除する）。
+
+**役割Skillはすべて明示呼び出し専用。** 各Skillの `agents/openai.yaml`
+（`allow_implicit_invocation: false`）とClaude側の `disable-model-invocation: true`
+により、ユーザーが `$pm` 等を打たない限り自動発動しない。ai-devteamを使わない
+プロジェクトのセッションが勝手に役割モードへ入ることを防ぐため、この設定を外さない。
 
 ## セットアップ（最初に1回）
 
@@ -28,8 +34,8 @@ ai-devteam/
 sh scripts/install.sh
 ```
 
-これで全プロジェクトから `/pm` `/tech-lead` `/implementer` `/auditor`（Codex）と
-監査Skill（Claude Code）が使えるようになる。
+これで全プロジェクトから `$pm` `$tech-lead` `$implementer` `$auditor`（Codex。
+`/skills` からも選択可）と監査Skill `/auditor`（Claude Code）が使えるようになる。
 テンプレを改訂したら、このリポジトリで編集 → コミット → install.sh再実行。
 
 ## プロジェクトごとの準備（プロジェクトにつき1回）
@@ -71,13 +77,13 @@ cp ~/Desktop/ai-devteam/claude/settings.json <プロジェクトルート>/.clau
 あなた（ユーザー）の承認ゲートは従来どおり2つ: 実装前サマリ承認と最終クローズ判定。
 
 ```
-1. PM        : プロジェクトdirで codex → /pm → 決定事項を伝える
+1. PM        : プロジェクトdirで codex → $pm → 決定事項を伝える
                → 壁打ち → spec.md / tasks.md / task-01/instruction.md を書き出す
-2. 実装担当   : 別セッションで /implementer → 「task-01/instruction.md を読んで」
+2. 実装担当   : 別セッションで $implementer → 「task-01/instruction.md を読んで」
                → pre-summary.md 提出 → ★あなたが承認 → 実装＋テスト
                → あなたがfeatureブランチへコミット → report.md / summary.md 書き出し
 3. PM        : 「report.md を確認して」→ 裏取り → audit-request.md 書き出し
-4. 監査       : 新規セッション×2（Codex: /auditor、Claude: 監査Skill）
+4. 監査       : 新規セッション×2（Codex: $auditor、Claude: 監査Skill）
                → 「audit-request.md を読んで監査して」
                → audit-codex.md / audit-claude.md 書き出し
 5. PM        : 監査2件を整理 → audit-triage.md
@@ -118,10 +124,10 @@ spec/tasks/   ★ゲート1:          audit-      audit-      audit-
 
 | セッション | 立ち上げ方 | 寿命 |
 |---|---|---|
-| PM | プロジェクトdirで `codex` → `/pm` | 機能開発のあいだ維持 |
-| 実装担当 | 別セッションで `codex` → `/implementer` | 機能開発のあいだ維持 |
-| Tech Lead | 必要時のみ `codex` → `/tech-lead` | 相談ごと |
-| Codex監査 | 監査ごとに新規 `codex` → `/auditor` | 使い捨て |
+| PM | プロジェクトdirで `codex` → `$pm` | 機能開発のあいだ維持 |
+| 実装担当 | 別セッションで `codex` → `$implementer` | 機能開発のあいだ維持 |
+| Tech Lead | 必要時のみ `codex` → `$tech-lead` | 相談ごと |
+| Codex監査 | 監査ごとに新規 `codex` → `$auditor` | 使い捨て |
 | Claude監査 | 監査ごとに新規 `claude` → `/auditor`（Skill） | 使い捨て |
 
 あなたの承認ゲートは2つ: **実装前サマリの承認** と **最終クローズ判定**。
@@ -135,7 +141,7 @@ codex
 ```
 
 ```
-あなた: /pm
+あなた: $pm
 あなた: ログイン機能を開発します。MTG決定事項は以下です。
         - メール+パスワードでログインできる
         - 失敗5回でロック
@@ -168,7 +174,7 @@ codex
 ```
 
 ```
-あなた: /implementer
+あなた: $implementer
 あなた: docs/flow/login/task-01/instruction.md を読んで作業を開始してください
 実装 : （指示書・spec.md・既存コードを確認）不明点が2つあります。〜〜
 あなた: （回答する）
@@ -213,7 +219,7 @@ PM   : （report.mdを読み、コードと突き合わせて裏取り）問題�
 Codex側（新規セッション）:
 
 ```
-あなた: /auditor
+あなた: $auditor
 あなた: docs/flow/login/task-01/audit-request.md を読んで監査してください
 監査 : docs/flow/login/task-01/audit-codex.md に書き出しました
         監査結果: 修正必要
@@ -287,14 +293,14 @@ PMまたは実装担当が「Tech Lead相談条件に該当する」と報告し
 
 ```
 あなた: （PMセッションで）Tech Lead相談資料を作成してください
-PM   : docs/flow/login/tech-lead/jwt-aud互換性.md に書き出しました
+PM   : docs/flow/login$tech-lead/jwt-aud互換性.md に書き出しました
 ```
 
 新規セッションで:
 
 ```
-あなた: /tech-lead
-あなた: docs/flow/login/tech-lead/jwt-aud互換性.md を読んで判断してください
+あなた: $tech-lead
+あなた: docs/flow/login$tech-lead/jwt-aud互換性.md を読んで判断してください
 TL   : （判断結果を同ディレクトリに書き出し）
 ```
 
@@ -307,7 +313,7 @@ spec.mdへ反映してください」と伝える。
 挙動変更なし）では、PMに軽量パスを提案させることができる:
 
 ```
-あなた: /pm
+あなた: $pm
 あなた: READMEの手順修正です。軽量パスでお願いします
 PM   : 軽量パス条件に該当します。壁打ちを省略し、
         docs/flow/readme-fix/task-01/instruction.md を作成しました
@@ -322,15 +328,15 @@ PM   : 軽量パス条件に該当します。壁打ちを省略し、
 
 | # | セッション | あなたが打つ言葉 | 返ってくるもの |
 |---|---|---|---|
-| 1 | PM | `/pm` → MTG決定事項を伝える | 全体像の報告と質問 |
+| 1 | PM | `$pm` → MTG決定事項を伝える | 全体像の報告と質問 |
 | 2 | PM | 「壁打ちを進めてください」→ 質問に回答 | 壁打ちの質問リスト |
 | 3 | PM | 「実装ドキュメントにまとめてください」 | spec.md |
 | 4 | PM | 「タスク分割してください」 | tasks.md |
 | 5 | PM | 「task-01の指示書を作成してください」 | task-01/instruction.md |
-| 6 | 実装 | `/implementer` → 「task-01/instruction.md を読んで作業を開始してください」 | 質問・指摘 → pre-summary.md |
+| 6 | 実装 | `$implementer` → 「task-01/instruction.md を読んで作業を開始してください」 | 質問・指摘 → pre-summary.md |
 | 7 | 実装 | ★「承認します。実装に進んでください」 | 実装＋テスト → コミット依頼（あなたが実行） → report.md / summary.md |
 | 8 | PM | 「task-01/report.md を確認してください」 | 裏取り → audit-request.md |
-| 9 | 監査×2（毎回新規） | `/auditor` → 「task-01/audit-request.md を読んで監査してください」 | audit-codex.md / audit-claude.md |
+| 9 | 監査×2（毎回新規） | `$auditor`（Codex）/`/auditor`（Claude） → 「task-01/audit-request.md を読んで監査してください」 | audit-codex.md / audit-claude.md |
 | 10 | PM | 「監査結果2件を整理してください」 | audit-triage.md |
 | 11 | 実装 | 「task-01/audit-triage.md の修正指示に対応してください」（修正必要時のみ） | 修正 → コミット依頼（あなたが実行） → report.md 更新 → 9へ戻る |
 | 12 | PM | ★「クローズします。task-02へ進めてください」 | task-02/instruction.md |

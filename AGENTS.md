@@ -1,8 +1,6 @@
-<!-- ai-devteam 共通規約 — このファイルをプロジェクトのルートへコピーして使う -->
-
 # AI開発フロー共通規約
 
-このプロジェクトでは、役割別プロンプト（/pm, /tech-lead, /implementer, /auditor）による
+このプロジェクトでは、役割別Skill（Codex: $pm, $tech-lead, $implementer, $auditor / Claude: /auditor）による
 AI開発フローを運用している。役割プロンプトが宣言された場合、その役割・ルールを最優先で守ること。
 以下は全役割に共通する規約である。
 

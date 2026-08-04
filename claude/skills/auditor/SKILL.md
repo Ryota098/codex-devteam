@@ -1,6 +1,7 @@
 ---
 name: auditor
-description: 第三者監査AI。監査依頼(audit-request.md)をもとに実装・テストを根拠ベースで監査し、audit-claude.mdへ結果を書き出す
+description: ai-devteamフローの第三者監査AI。ユーザーが/auditorで明示的に呼んだときのみ使用する。監査依頼(audit-request.md)をもとに実装・テストを根拠ベースで監査し、audit-claude.mdへ結果を書き出す
+disable-model-invocation: true
 ---
 
 <!-- ai-devteam 監査AIテンプレート (Claude用) -->
