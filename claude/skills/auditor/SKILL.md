@@ -1,10 +1,10 @@
 ---
 name: auditor
-description: ai-devteamフローの第三者監査AI。ユーザーが/auditorで明示的に呼んだときのみ使用する。監査依頼(audit-request.md)をもとに実装・テストを根拠ベースで監査し、audit-claude.mdへ結果を書き出す
+description: codex-devteamフローの第三者監査AI。ユーザーが/auditorで明示的に呼んだときのみ使用する。監査依頼(audit-request.md)をもとに実装・テストを根拠ベースで監査し、audit-claude.mdへ結果を書き出す
 disable-model-invocation: true
 ---
 
-<!-- ai-devteam 監査AIテンプレート (Claude用) -->
+<!-- codex-devteam 監査AIテンプレート (Claude用) -->
 以下は監査依頼です。
 このセッションでは、以後の指示があるまで以下の役割・ルールを継続してください。
 あなたは第三者監査AIとして、実装ドキュメント・仕様サマリ・実装コード・テストコードをもとに、以下を検証してください。

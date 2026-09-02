@@ -1,5 +1,5 @@
 #!/bin/sh
-# ai-devteam のテンプレ一式をローカル環境へ配備する
+# codex-devteam のテンプレ一式をローカル環境へ配備する
 # - codex/skills/*  → ~/.agents/skills/   (Codexの $pm $tech-lead $implementer $auditor)
 # - claude/skills/* → ~/.claude/skills/   (Claude Codeの監査Skill /auditor)
 # テンプレを改訂したら、このスクリプトを再実行して反映する

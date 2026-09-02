@@ -1,5 +1,5 @@
 {
-  "_comment": "ai-devteam ガードレール雛形 — プロジェクトの .claude/settings.json へコピーして使う。git変更操作はオーナーのみが行う(AGENTS.md参照)ため、AIセッションからのgit変更系コマンドを物理的にブロックする。既存のsettings.jsonがある場合はpermissionsをマージすること",
+  "_comment": "codex-devteam ガードレール雛形 — プロジェクトの .claude/settings.json へコピーして使う。git変更操作はオーナーのみが行う(AGENTS.md参照)ため、AIセッションからのgit変更系コマンドを物理的にブロックする。既存のsettings.jsonがある場合はpermissionsをマージすること",
   "permissions": {
     "deny": [
       "Bash(git add:*)",

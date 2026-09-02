@@ -1,11 +1,11 @@
-# ai-devteam — AI開発フロー テンプレート集
+# codex-devteam — AI開発フロー テンプレート集
 
 役割別AIセッション（PM / Tech Lead / 実装担当 / 監査AI×2）で開発を進めるためのテンプレートと運用規約のマスターリポジトリ。
 
 ## 構成
 
 ```
-ai-devteam/
+codex-devteam/
 ├── README.md                        # このファイル（運用手順）
 ├── AGENTS.md                        # 各プロジェクトのルートへコピーする共通規約
 ├── codex/skills/                    # Codex用の役割Skill（マスター）
@@ -25,7 +25,7 @@ ai-devteam/
 
 **役割Skillはすべて明示呼び出し専用。** 各Skillの `agents/openai.yaml`
 （`allow_implicit_invocation: false`）とClaude側の `disable-model-invocation: true`
-により、ユーザーが `$pm` 等を打たない限り自動発動しない。ai-devteamを使わない
+により、ユーザーが `$pm` 等を打たない限り自動発動しない。codex-devteamを使わない
 プロジェクトのセッションが勝手に役割モードへ入ることを防ぐため、この設定を外さない。
 
 ## セットアップ（最初に1回）
@@ -41,13 +41,13 @@ sh scripts/install.sh
 ## プロジェクトごとの準備（プロジェクトにつき1回）
 
 ```sh
-cp ~/Desktop/ai-devteam/AGENTS.md <プロジェクトルート>/AGENTS.md
+cp ~/Desktop/codex-devteam/AGENTS.md <プロジェクトルート>/AGENTS.md
 mkdir -p <プロジェクトルート>/.claude
-cp ~/Desktop/ai-devteam/claude/settings.json <プロジェクトルート>/.claude/settings.json
+cp ~/Desktop/codex-devteam/claude/settings.json <プロジェクトルート>/.claude/settings.json
 
 cat >> <プロジェクトルート>/.gitignore <<'EOF'
 
-# AI開発フロー（ai-devteam）の運用ファイル — コミットしない
+# AI開発フロー（codex-devteam）の運用ファイル — コミットしない
 /AGENTS.md
 /CLAUDE.md
 /docs/flow/

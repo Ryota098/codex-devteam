@@ -11,6 +11,7 @@ AI開発フローを運用している。役割プロンプトが宣言された
   - `spec.md` 実装ドキュメント（正本） / `tasks.md` タスク分割
   - `task-NN/instruction.md` 指示書 / `pre-summary.md` 実装前サマリ
   - `task-NN/report.md` 完了報告 / `summary.md` 監査用仕様サマリ
+  - `task-NN/report.md` 完了報告 / `summary.md` 監査用仕様サマリ
   - `task-NN/audit-request.md` 監査依頼 / `audit-codex.md` `audit-claude.md` 監査結果
   - `task-NN/audit-triage.md` 監査結果の整理
   - `tech-lead/<件名>.md` Tech Lead相談資料
