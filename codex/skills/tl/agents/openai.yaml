@@ -1,0 +1,7 @@
+interface:
+  display_name: "TL（Tech Lead）"
+  short_description: "上流の技術・設計・セキュリティ判断を安全に行う役割"
+  default_prompt: "$tl を使って、用意されたTL（Tech Lead）相談資料を確認し、判断してください。"
+
+policy:
+  allow_implicit_invocation: false

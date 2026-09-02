@@ -1,6 +1,6 @@
 #!/bin/sh
 # codex-devteam のテンプレ一式をローカル環境へ配備する
-# - codex/skills/*  → ~/.agents/skills/   (Codexの $pm $tech-lead $implementer $auditor)
+# - codex/skills/*  → ~/.agents/skills/   (Codexの $pm $tl $implementer $auditor)
 # - claude/skills/* → ~/.claude/skills/   (Claude Codeの監査Skill /auditor)
 # テンプレを改訂したら、このスクリプトを再実行して反映する
 set -eu
@@ -8,6 +8,10 @@ set -eu
 repo_dir=$(cd "$(dirname "$0")/.." && pwd)
 
 mkdir -p "$HOME/.agents/skills"
+if [ -d "$HOME/.agents/skills/tech-lead" ]; then
+  rm -rf "$HOME/.agents/skills/tech-lead"
+  echo "removed legacy skill: ~/.agents/skills/tech-lead/"
+fi
 for skill_dir in "$repo_dir"/codex/skills/*/; do
   name=$(basename "$skill_dir")
   rm -rf "$HOME/.agents/skills/$name"
