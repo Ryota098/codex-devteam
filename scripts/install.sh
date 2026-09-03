@@ -31,4 +31,5 @@ for f in pm tech-lead implementer auditor; do
   fi
 done
 
+echo "note: existing projects are not rewritten; replace each project's AGENTS.md with $repo_dir/AGENTS.md when common rules change"
 echo "done"
