@@ -1,0 +1,22 @@
+default_permissions = "ai-devteam-review"
+
+[permissions.ai-devteam-review]
+description = "ai-devteam TL/auditor: read-only product with flow-result write, no network"
+extends = ":read-only"
+
+[permissions.ai-devteam-review.filesystem]
+glob_scan_max_depth = 6
+
+[permissions.ai-devteam-review.filesystem.":workspace_roots"]
+"docs/flow" = "write"
+"AGENTS.md" = "read"
+"CLAUDE.md" = "read"
+".codex" = "read"
+".claude" = "read"
+"**/.env" = "deny"
+"**/.env.*" = "deny"
+"**/*.pem" = "deny"
+"**/*.key" = "deny"
+
+[permissions.ai-devteam-review.network]
+enabled = false

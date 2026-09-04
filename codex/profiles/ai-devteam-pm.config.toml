@@ -1,0 +1,29 @@
+default_permissions = "ai-devteam-pm"
+
+[permissions.ai-devteam-pm]
+description = "ai-devteam PM: flow and common formal-doc locations only, no network"
+extends = ":read-only"
+
+[permissions.ai-devteam-pm.filesystem]
+glob_scan_max_depth = 6
+
+[permissions.ai-devteam-pm.filesystem.":workspace_roots"]
+"docs" = "write"
+"doc" = "write"
+"adr" = "write"
+"ADR" = "write"
+"README" = "write"
+"README.md" = "write"
+"CHANGELOG" = "write"
+"CHANGELOG.md" = "write"
+"AGENTS.md" = "read"
+"CLAUDE.md" = "read"
+".codex" = "read"
+".claude" = "read"
+"**/.env" = "deny"
+"**/.env.*" = "deny"
+"**/*.pem" = "deny"
+"**/*.key" = "deny"
+
+[permissions.ai-devteam-pm.network]
+enabled = false

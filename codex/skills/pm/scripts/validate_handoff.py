@@ -68,7 +68,32 @@ def parse_fields(section: str) -> dict[str, str]:
     return fields
 
 
-def validate_table(section: str, heading: str, header: str, label: str) -> list[str]:
+def table_rows(section: str, header: str) -> list[list[str]]:
+    lines = [line.strip() for line in section.splitlines()]
+    try:
+        start = lines.index(header)
+    except ValueError:
+        return []
+    rows: list[list[str]] = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("|"):
+            if rows:
+                break
+            continue
+        if re.fullmatch(r"\|[ :\-|]+\|", line):
+            continue
+        rows.append([cell.strip() for cell in line.strip("|").split("|")])
+    return rows
+
+
+def validate_table(
+    section: str,
+    heading: str,
+    header: str,
+    label: str,
+    *,
+    expected_result: str | None = None,
+) -> list[str]:
     errors: list[str] = []
     if heading not in section:
         errors.append(f"証跡に『{heading}』がない")
@@ -76,14 +101,14 @@ def validate_table(section: str, heading: str, header: str, label: str) -> list[
         errors.append(f"証跡に{label}の判定表がない")
         return errors
 
-    table_lines = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
-    data_lines = [
-        line
-        for line in table_lines
-        if line != header and not re.fullmatch(r"\|[ :\-|]+\|", line)
-    ]
-    if not data_lines:
+    rows = table_rows(section, header)
+    if not rows:
         errors.append(f"証跡の{label}判定表にデータ行がない")
+    elif expected_result is not None:
+        for row in rows:
+            if len(row) < 2 or row[1] != expected_result:
+                name = row[0] if row else "不明"
+                errors.append(f"{label}『{name}』の判定は『{expected_result}』でなければならない")
     return errors
 
 
@@ -129,6 +154,7 @@ def validate_preflight(text: str, required: bool) -> list[str]:
             "### 確認対象別判定",
             "| 確認対象 | 判定 | 根拠 |",
             "確認対象別",
+            expected_result="実装開始可",
         )
     )
     return errors
@@ -189,6 +215,7 @@ def validate_loop_state(path: Path) -> list[str]:
             "### 受け入れ条件別判定",
             "| 受け入れ条件 | 判定 | 根拠 |",
             "受け入れ条件別",
+            expected_result="合格",
         )
     )
 
@@ -197,25 +224,46 @@ def validate_loop_state(path: Path) -> list[str]:
 
 def validate_report(path: Path) -> list[str]:
     errors: list[str] = []
-    section = markdown_section(path.read_text(encoding="utf-8"), "正式ドキュメント影響")
+    text = path.read_text(encoding="utf-8")
+    section = markdown_section(text, "正式ドキュメント影響")
     if section is None:
-        return ["report.mdに『## 正式ドキュメント影響』がない"]
-
-    fields = parse_fields(section)
-    if fields.get("実装担当による正式ドキュメント変更") != "なし":
-        errors.append("実装担当による正式ドキュメント変更は『なし』でなければならない")
-
-    candidate = fields.get("PM更新候補", "")
-    if not candidate:
-        errors.append("正式ドキュメント影響に『PM更新候補』がない")
-    elif candidate == "なし":
-        reason = fields.get("更新不要の理由", "")
-        if reason in {"", "なし", "不明", "未確認"}:
-            errors.append("PM更新候補がない場合は具体的な『更新不要の理由』が必要")
+        errors.append("report.mdに『## 正式ドキュメント影響』がない")
     else:
-        facts = fields.get("確認済み事実", "")
-        if facts in {"", "なし", "不明", "未確認"}:
-            errors.append("PM更新候補がある場合は文書化できる『確認済み事実』が必要")
+        fields = parse_fields(section)
+        if fields.get("実装担当による正式ドキュメント変更") != "なし":
+            errors.append("実装担当による正式ドキュメント変更は『なし』でなければならない")
+
+        candidate = fields.get("PM更新候補", "")
+        if not candidate:
+            errors.append("正式ドキュメント影響に『PM更新候補』がない")
+        elif candidate == "なし":
+            reason = fields.get("更新不要の理由", "")
+            if reason in {"", "なし", "不明", "未確認"}:
+                errors.append("PM更新候補がない場合は具体的な『更新不要の理由』が必要")
+        else:
+            facts = fields.get("確認済み事実", "")
+            if facts in {"", "なし", "不明", "未確認"}:
+                errors.append("PM更新候補がある場合は文書化できる『確認済み事実』が必要")
+
+    evidence = markdown_section(text, "受け入れ条件と検証証拠")
+    if evidence is None:
+        errors.append("report.mdに『## 受け入れ条件と検証証拠』がない")
+    else:
+        errors.extend(
+            validate_table(
+                evidence,
+                "",
+                "| 受け入れ条件 | 実装箇所 | 検証証拠 | 結果 |",
+                "受け入れ条件と検証証拠",
+            )
+        )
+        for line in evidence.splitlines():
+            if not line.strip().startswith("|") or "---" in line:
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if cells and cells[0] != "受け入れ条件" and len(cells) == 4:
+                if cells[3] != "成功":
+                    errors.append(f"受け入れ条件『{cells[0]}』の結果が『成功』ではない")
 
     return errors
 
@@ -246,12 +294,45 @@ def validate_task_dir(task_dir: Path) -> list[str]:
     errors.extend(validate_report(task_dir / "report.md"))
     errors.extend(validate_preflight(loop_text, required=markers == ["必須"]))
     errors.extend(validate_loop_state(task_dir / "loop-state.md"))
+
+    acceptance = markdown_section(instruction, "受け入れ条件")
+    report_evidence = markdown_section(
+        (task_dir / "report.md").read_text(encoding="utf-8"), "受け入れ条件と検証証拠"
+    )
+    loop_evidence = markdown_section(loop_text, "内部検証証跡")
+    instruction_rows = table_rows(
+        acceptance or "", "| 受け入れ条件 | 外部から観測できる期待結果 | 検証方法 |"
+    )
+    report_rows = table_rows(
+        report_evidence or "", "| 受け入れ条件 | 実装箇所 | 検証証拠 | 結果 |"
+    )
+    loop_rows = table_rows(
+        loop_evidence or "", "| 受け入れ条件 | 判定 | 根拠 |"
+    )
+    expected_conditions = [row[0] for row in instruction_rows if row]
+    if not expected_conditions:
+        errors.append("instruction.mdの受け入れ条件表を解析できない")
+    else:
+        if [row[0] for row in report_rows if row] != expected_conditions:
+            errors.append("report.mdの受け入れ条件がinstruction.mdと同一・同順ではない")
+        if [row[0] for row in loop_rows if row] != expected_conditions:
+            errors.append("loop-state.mdの受け入れ条件がinstruction.mdと同一・同順ではない")
     return errors
 
 
 def write_fixture(task_dir: Path, summary: str, loop_state: str, report: str) -> None:
     (task_dir / "instruction.md").write_text(
-        "# 指示書\n\n- 実装前内部検証: 必須\n", encoding="utf-8"
+        """# 指示書
+
+- 実装前内部検証: 必須
+
+## 受け入れ条件
+
+| 受け入れ条件 | 外部から観測できる期待結果 | 検証方法 |
+| --- | --- | --- |
+| 条件1 | 期待結果 | test-1 |
+""",
+        encoding="utf-8",
     )
     (task_dir / "report.md").write_text(report, encoding="utf-8")
     (task_dir / "summary.md").write_text(summary, encoding="utf-8")
@@ -314,19 +395,29 @@ def self_test() -> int:
 - 実装担当による正式ドキュメント変更: なし
 - PM更新候補: docs/guide.md
 - 確認済み事実: route.tsの公開挙動とtest-1の結果
+
+## 受け入れ条件と検証証拠
+
+| 受け入れ条件 | 実装箇所 | 検証証拠 | 結果 |
+| --- | --- | --- | --- |
+| 条件1 | route.ts | test-1 | 成功 |
 """
     invalid_summary = valid_summary.replace("[BRANCHES] 分岐\n", "[TESTS] 成功\n")
     invalid_loop = "# ループ\n\n## 内部検証\n\n合格。\n"
+    row_failure_loop = valid_loop.replace("| 条件1 | 合格 | test-1 |", "| 条件1 | 不合格 | test-1 |")
     invalid_report = "# 報告\n"
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         valid = root / "valid"
         invalid = root / "invalid"
+        row_failure = root / "row-failure"
         valid.mkdir()
         invalid.mkdir()
+        row_failure.mkdir()
         write_fixture(valid, valid_summary, valid_loop, valid_report)
         write_fixture(invalid, invalid_summary, invalid_loop, invalid_report)
+        write_fixture(row_failure, valid_summary, row_failure_loop, valid_report)
         if validate_task_dir(valid):
             raise AssertionError("正常fixtureが失敗した")
         invalid_errors = validate_task_dir(invalid)
@@ -338,8 +429,11 @@ def self_test() -> int:
             raise AssertionError("必須の実装前検証証跡の欠落を検出できなかった")
         if not any("正式ドキュメント影響" in error for error in invalid_errors):
             raise AssertionError("正式ドキュメント影響の欠落を検出できなかった")
+        row_errors = validate_task_dir(row_failure)
+        if not any("判定は『合格』" in error for error in row_errors):
+            raise AssertionError("受け入れ条件単位の不合格を検出できなかった")
 
-    print("self-test: 5 checks passed")
+    print("self-test: 7 checks passed")
     return 0
 
 

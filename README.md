@@ -1,433 +1,215 @@
-# codex-devteam — AI開発フロー テンプレート集
+# codex-devteam
 
-役割別AIセッション（PM / TL（Tech Lead） / 実装担当 / 監査AI×2）で開発を進めるためのテンプレートと運用規約のマスターリポジトリ。
+PM、TL（Tech Lead）、実装担当、Codex監査、Claude監査を独立セッションで運用する、明示起動型のAI開発フローです。実装担当内では、Builderと読み取り専用の内部検証担当が制限付きループを行います。
 
-## 構成
+`flowctl`が、有効化された役割セッションの工程順、変更範囲、オーナー承認、監査数を検証します。AIや別セッションを自動起動するツールではありません。
 
-```
-codex-devteam/
-├── README.md                        # このファイル（運用手順）
-├── AGENTS.md                        # 各プロジェクトのルートへコピーする共通規約
-├── codex/skills/                    # Codex用の役割Skill（マスター）
-│   ├── pm/SKILL.md                  # $pm          プロジェクトマネージャー
-│   ├── tl/SKILL.md                  # $tl          TL（Tech Lead。上流の技術判断）
-│   ├── implementer/SKILL.md         # $implementer 実装＋テスト
-│   ├── auditor/SKILL.md             # $auditor     Codex監査
-│   └── */agents/openai.yaml         # 暗黙発動の禁止設定（各Skillに同梱）
-├── claude/skills/auditor/SKILL.md   # Claude Code用の監査Skill（/auditor）
-├── claude/settings.json             # プロジェクトへコピーするガードレール雛形（git変更操作のdeny）
-└── scripts/install.sh               # ローカル環境への配備スクリプト
-```
+## 有効化
 
-**このリポジトリを `~/.agents/skills/` へ直接cloneしないこと。**
-マスターはここに置き、install.shでコピーする（Codexの旧custom prompts
-`~/.codex/prompts/` はdeprecatedのため使わない。install.shが残骸を掃除する）。
+新しいセッションは通常モードで始まり、ai-devteamは無効です。プロジェクトに`AGENTS.md`や`docs/flow/`があっても、通常の質問・調査・実装をai-devteamの工程へ自動変換しません。
 
-**役割Skillはすべて明示呼び出し専用。** 各Skillの `agents/openai.yaml`
-（`allow_implicit_invocation: false`）とClaude側の `disable-model-invocation: true`
-により、ユーザーが `$pm` 等を打たない限り自動発動しない。codex-devteamを使わない
-プロジェクトのセッションが勝手に役割モードへ入ることを防ぐため、この設定を外さない。
+| ユーザーの依頼 | 動作 |
+| --- | --- |
+| 役割指定なし | 通常のCodexとして動作。ai-devteamのフック制限、工程遷移、ハンドオフを適用しない |
+| `$pm`、`$tl`、`$implementer`、`$auditor`で役割開始を明示 | Skillが最初に`flowctl role-start`を実行し、成功後からそのセッションだけai-devteamを有効化 |
+| 呼出し名を質問・説明・比較・引用・例文で記載 | Skill本文が添付されても役割を開始せず、通常モードを維持 |
 
-## セットアップ（最初に1回）
+役割開始後はセッション終了まで同じ役割を維持します。通常モードのセッションを途中から役割セッションとして使う場合も、ユーザーが役割開始を明示した場合に限ります。
+Codex Skillは`allow_implicit_invocation: false`に設定し、モデルによる暗黙選択を無効化しています。
+
+## 運用原則
+
+| 領域 | 現行ルール |
+| --- | --- |
+| スコープ | 外部成果・全変更パス・リスク区分／領域・ファイル数／差分行数をオーナー固定 |
+| TL | 上流設計、重大な技術・セキュリティ判断が必要な場合だけ使用 |
+| 実装 | 既存パターン調査、実装、テスト、内部検証、修正を上限付きで反復 |
+| 文書 | 正式ドキュメントはPMだけが更新。実装担当は影響を報告 |
+| 工程 | 実装担当から必ずPMへ戻し、PM確認・オーナーコミット後だけ監査可能 |
+| 監査 | 独立2監査が既定。1監査はオーナーがスコープ固定時に選んだ場合だけ |
+| 制御 | `role-start`後、フックが役割外書込み、Git変更、秘密情報、本番・共有環境等を拒否 |
+| 計測 | 所要時間、セッション数、PM差し戻し率、初回監査合格を自動記録 |
+
+## セットアップ
+
+マスターリポジトリで実行します。
 
 ```sh
 sh scripts/install.sh
 ```
 
-これで全プロジェクトから `$pm` `$tl` `$implementer` `$auditor`（Codex。
-`/skills` からも選択可）と監査Skill `/auditor`（Claude Code）が使えるようになる。
-テンプレを改訂したら、このリポジトリで編集 → コミット → install.sh再実行。
+この処理はテスト後、役割Skill、`~/.ai-devteam/bin/flowctl`、Codex/Claudeのフック、Codexの役割別権限プロファイルを配備します。グローバルフックは通常モードでは素通しし、`role-start`後だけ制御します。配備後はCodexとClaudeの既存セッションを終了し、新しいセッションを開始してください。
 
-## プロジェクトごとの準備（プロジェクトにつき1回）
+プロジェクトでは最新版の`AGENTS.md`をルートへ置きます。Claudeも使う場合は同じ内容を`CLAUDE.md`へ置きます。
 
 ```sh
-cp ~/Desktop/codex-devteam/AGENTS.md <プロジェクトルート>/AGENTS.md
-mkdir -p <プロジェクトルート>/.claude
-cp ~/Desktop/codex-devteam/claude/settings.json <プロジェクトルート>/.claude/settings.json
-
-cat >> <プロジェクトルート>/.gitignore <<'EOF'
-
-# AI開発フロー（codex-devteam）の運用ファイル — コミットしない
-/AGENTS.md
-/CLAUDE.md
-/docs/flow/
-EOF
+cp AGENTS.md <project>/AGENTS.md
+cp AGENTS.md <project>/CLAUDE.md
 ```
 
-`docs/flow/` はPMが最初の機能開発時に自動作成するので事前準備は不要。
-（Claude Codeを併用するプロジェクトでは、AGENTS.mdの内容をCLAUDE.mdにも反映するか
-シンボリックリンクを張る）
+`AGENTS.md`、`CLAUDE.md`、`docs/flow/`はローカル工程ファイルとしてgitignoreします。役割制御はグローバルフックが行うため、`claude/settings.json`の旧Git deny雛形はプロジェクトへコピーしません。
 
-### gitignoreの方針
-
-規約ファイル（AGENTS.md / CLAUDE.md）と工程ファイル（docs/flow/）は
-**プロジェクトのリポジトリにコミットしない**。AI運用のためのローカルファイルであり、
-プロダクトの成果物ではないため、プロジェクトのgit履歴を汚さない。
-
-- ignoreする: `/AGENTS.md`、`/CLAUDE.md`、`/docs/flow/`
-- ignoreしない: `.claude/settings.json`（ガードレールなのでリポジトリに残す。
-  `.claude/settings.local.json` は各自のローカル設定なのでignoreしてよい）
-
-この方針の帰結として、次の2点に注意する。
-
-- **工程記録はgit履歴に残らない。** よって各タスクのコミット可判定前に、spec.md の確定内容を
-  PMが正式ドキュメント（コミット対象）へ反映し、機能クローズ前にも全体を再確認する
-- **docs/flow/ はローカル限定。** 別マシン・別クローンには引き継がれないので、
-  他人と共有したい情報は正式ドキュメントに書く
-
-すでにコミット済みのプロジェクトでは、追跡から外してからコミットする（ファイル自体は残る）。
+旧版の雛形をコピー済みのプロジェクトでは、まず`diagnose`で確認し、検出された場合だけオーナーが自分のターミナルで除去します。既知のGit deny 27件と読み取りallow 7件だけを削除し、その他のClaude設定を保持したバックアップを作成します。
 
 ```sh
-git rm -r --cached AGENTS.md CLAUDE.md docs/flow
+~/.ai-devteam/bin/flowctl diagnose --project-root <project>
+~/.ai-devteam/bin/flowctl remove-legacy-claude-guards \
+  --project-root <project> \
+  --owner-confirmed
 ```
 
-### ガードレール（ルールの物理的な強制）
+## 基本フロー
 
-「git変更操作はオーナーのみ」はテンプレの文章だけでなく、ツール設定でも強制する。
-
-- **Claude Code側**: 上でコピーした `.claude/settings.json` が git 変更系コマンド
-  （add / commit / push / checkout / merge / reset / tag / branch / gh pr 等）を
-  deny し、読み取り系（status / log / diff / show / blame）のみ allow する。
-  既存の settings.json があるプロジェクトでは permissions をマージする
-- **Codex側**: `~/.codex/config.toml` に以下を設定する（全プロジェクト共通）
-
-  ```toml
-  approval_policy = "on-request"
-  sandbox_mode    = "workspace-write"
-  ```
-
-  workspace-write サンドボックスでは `.git` などの保護パスへの書き込みが
-  ブロックされるため、コミット等のgit変更操作は承認なしには実行されない。
-  より厳しくするなら `approval_policy = "untrusted"`（シェルコマンド全般に承認要求）
-- **CI**: テスト・lint・型チェックを必須化し、依存関係検査・秘密情報検査・静的解析も
-  利用可能な範囲で組み込む（このリポジトリの管轄外だが、AGENTS.mdに明記済み）
-
-## 機能開発の流れ
-
-役割ごとにセッションを分け、受け渡しはファイルパスで行う。
-あなた（ユーザー）の承認ゲートは従来どおり2つ: 実装前サマリ承認と最終クローズ判定。
-
-```
-1. PM        : プロジェクトdirで codex → $pm → 決定事項を伝える
-               → 実コードから業務入口・全呼出し元・既存挙動を確認
-               → 壁打ち → リスク領域を分割 → spec.md / tasks.md / instruction.md
-2. 実装担当   : 別セッションで $implementer → 「task-01/instruction.md を読んで」
-               → 既存パターンと前提事実を調査 → pre-summary.md
-               → 高リスクなら実装前内部検証を自動起動 → ★あなたが承認
-               → Builderが実装・テスト → 内部検証担当を別コンテキストで自動起動
-               → 修正必要ならBuilderへ戻す制限付きループ
-               → report.md / summary.md / loop-state.mdを書き出してPMへ返す
-3. PM        : 成果物形式・未コミット候補差分・検証結果を裏取り
-               → 不備なら実装担当へ返す／合格ならPMが正式ドキュメントを更新
-               → 再照合後にimplementation-review.mdを書き出す
-               → あなたがコミット → PMが確定HEADと非空の差分を再確認
-               → audit-request.mdを書き出す
-4. 監査       : 基本は新規セッション×2（Codex: $auditor、Claude: 監査Skill）
-               → あなたが明示した場合だけ1監査
-               → 「audit-request.md を読んで監査して」
-               → audit-codex.md / audit-claude.md 書き出し
-5. PM        : あなたが指定した監査結果を整理 → audit-triage.md
-               → 修正必要なら実装担当へ（2へ戻る。原則2ラウンドまで）
-               → 「今すぐ直すべき」ゼロ → ★あなたがクローズ判定 → 完了
+```text
+PM: 壁打ち・根拠確認・scope-baseline/spec/tasks/instruction
+ ↓ 必要な場合だけ
+TL: 上流の技術・設計・セキュリティ判断
+ ↓
+実装担当: 既存調査 → pre-summary → オーナー開始承認
+           → 実装・テスト → 内部検証 → 修正・再検証
+ ↓
+PM: 未コミット差分と証拠を裏取り、正式ドキュメントを更新
+ ↓
+オーナー: コミット
+ ↓
+PM: 確定差分を再確認しaudit-request.mdを作成
+ ↓
+Codex監査・Claude監査（既定2、独立セッション）
+ ↓
+PM: 監査整理
+ ↓
+オーナー: クローズ
 ```
 
-## チュートリアル: 1機能を通しで開発する
+各役割はユーザーが新しい独立セッションで`$pm`等を明示して開始します。PMと実装担当は同じ機能内でセッションを再利用できます。TLは相談ごと、監査は監査ごとに新規セッションを使います。
 
-「ログイン機能」を例に、セッションの立ち上げからクローズまで、
-あなたが実際に打つ言葉レベルで示す。
+## スコープと不足の扱い
 
-### 全体マップ
+PMは`docs/flow/<feature>/scope-baseline.md`へ次を記載します。
 
-```
-Step 1        Step 2                 Step 3                   Step 4       Step 5
-PMが準備 ──▶ Builder↔内部検証 ──▶ PMが候補・正式文書確認 ──▶ 基本2監査 ──▶ PMが整理
-spec/tasks/   ★ゲート1:          不備なら差戻し             audit-      audit-
-指示書        サマリ承認          合格→あなたがコミット      codex/      triage
-                 ▲               PMが確定差分→audit-request  claude        │
-                 │                                                       │
-                 └──────── Step 6 修正指示（原則2ラウンド）◀─────────────┤
-                                                                         │
-                                                       「今すぐ直すべき」ゼロ
-                                                                         ▼
-                                                           Step 7 ★ゲート2: クローズ判定
+```markdown
+## 承認対象
+
+| 要求ID | 承認済みの外部成果 | 変更可能パス | 許可するリスク領域 | リスク区分 | 変更上限 |
+| --- | --- | --- | --- | --- | --- |
+| 要求1 | 利用者が安全にデータを削除できる | `src/delete/**`<br>`tests/delete/**` | 不可逆削除 | 高 | 20ファイル / 2000行 |
+
+## 明示的な対象外
+
+- Slack通知、課金変更、別サービスの改修は行わない。
 ```
 
-覚えることは5つだけ:
+オーナーは仕様承認と同時に固定します。
 
-1. あなたが**判断する場面は2つ**（★ゲート1: 実装前サマリ承認、★ゲート2: クローズ判定）
-2. あなたが**運ぶのはファイルパス1行**（内容のコピペは不要。AI同士はファイル経由で読み合う）
-3. **役割ごとに独立セッション**（PM・実装担当は各自のセッションを維持し、TLは相談ごと、監査は監査ごとに新規起動）
-4. **git変更操作（add / commit / branch / push）はすべてあなたが実行**（実装完了時のコミット依頼は、候補差分を確認したPMだけが出す。読み取りはAIも可）
-5. **次に何をするかは各セッションが教えてくれる**。工程完了ごとに「要約 → 書き出したパス → 次のアクション → 次のセッションへ貼るプロンプト」の形で報告してくるので、あなたは提示されたプロンプトを次のセッションへコピペするだけでよい（この手順書を暗記する必要はない）
-
-### 登場するセッション
-
-| セッション | 立ち上げ方 | 寿命 |
-|---|---|---|
-| PM | プロジェクトdirで `codex` → `$pm` | 機能開発のあいだ維持 |
-| 実装担当 | 別セッションで `codex` → `$implementer` | 機能開発のあいだ維持 |
-| TL（Tech Lead） | 必要時のみ `codex` → `$tl` | 相談ごと |
-| Codex監査 | 監査ごとに新規 `codex` → `$auditor` | 使い捨て |
-| Claude監査 | 監査ごとに新規 `claude` → `/auditor`（Skill） | 使い捨て |
-
-各役割は、現在の役割内の調査・並列作業にサブエージェントを使ってよい。ただし、PM・TL・実装担当・各監査を別役割のサブエージェントとして代行させることはできない。役割間のプロンプトを運び、各独立セッションを開始するのはあなたである。
-
-内部検証担当は実装担当内の読み取り専用サブエージェントである。認証・課金・不可逆変更・外部送信等では実装前にも自動起動して誤った前提を止め、コード等の変更後にも自動起動して候補差分を確認する。独立セッションや正式監査ではなく、監査数にも含めない。起動できなければ自己確認で代替せず停止する。
-
-あなたの承認ゲートは2つ: **実装前サマリの承認** と **最終クローズ判定**。
-それ以外のあなたの仕事は「パスを1行伝える」ことと「質問に答える」こと。
-
-### Step 1. PMセッションを立ち上げ、要件を伝える
-
-```
-cd <プロジェクト>
-codex
+```sh
+~/.ai-devteam/bin/flowctl scope-lock \
+  --scope-file docs/flow/<feature>/scope-baseline.md \
+  --audits 2 \
+  --owner-confirmed
 ```
 
-```
-あなた: $pm
-あなた: ログイン機能を開発します。MTG決定事項は以下です。
-        - メール+パスワードでログインできる
-        - 失敗5回でロック
-        - セッションは24時間有効
-```
+実装中の発見は次の基準で扱います。
 
-PMはプロジェクトのドキュメントを読み、全体像・注意点・不明点を返してくる。
-以降もPMは勝手に次工程へ進まないので、あなたが「次へ」と指示して進める。
+- 元の外部成果がその変更なしでは成立せず、固定パス・リスク・変更上限内に収まる不足：根拠を残して同じタスクへ含める
+- 質問、壁打ち、候補案：回答しても自動的には実装へ追加しない
+- 既存方針で決められない上流の技術・セキュリティ判断：実装を止め、PMが`tl-request`で独立TLへ渡す
+- 新しい外部成果、利用者挙動、不可逆境界、変更パス、サービス責務、リスク領域：PMが差分化し、オーナー再承認後だけ追加
+- 「あると良い」改善、将来対応、周辺整理：別タスク候補
 
-```
-PM   : （全体像の報告と質問）ロック解除の手段は決まっていますか？
-あなた: 管理者による手動解除のみです。壁打ちを進めてください
-PM   : （壁打ちの質問リスト）
-あなた: （回答する）実装ドキュメントにまとめてください
-PM   : docs/flow/login/spec.md に書き出しました
-あなた: タスク分割してください
-PM   : docs/flow/login/tasks.md に書き出しました
-あなた: task-01の指示書を作成してください
-PM   : docs/flow/login/task-01/instruction.md に書き出しました
-        （featureブランチ名とbase commitも指示書に記載済み）
-```
+不足を同じタスクへ含める場合も、実コード・既存契約・再現テストで不可欠性を説明し、`loop-state.md`へ残します。
+変更可能パスはコード・テスト・設定・migration・PMが更新する正式ドキュメントを含む全候補です。`instruction.md`では、その内から正式ドキュメントを除いた実装担当のパスだけを選びます。
 
-指示書には番号付き受け入れ条件と、それぞれの期待結果・検証方法が記載される。内部検証担当はこの条件を基準に判定する。
+範囲拡大を採用する場合は、実装を止め、PMの差分提示とオーナー再固定後に`instruction-ready`を通します。同じ実装担当セッションでpre-summaryと必要な実装前内部検証を更新し、オーナーの`start-approve`後に再開します。リスク区分または監査構成自体が変わる場合は新しいtaskへ分けますが、同じ機能の実装担当セッションは再利用できます。
 
-### Step 2. 実装担当に指示書を渡す 【★ゲート1】
+## flowctlを実行する人とタイミング
 
-別ターミナルで:
+| 実行者 | タイミング | 主なコマンド |
+| --- | --- | --- |
+| フック | AIがツールを使う直前。通常モードは素通し | `flowctl hook`（自動） |
+| PM | 初期化、必要時のTL相談、指示書完成、差分確認、監査準備、監査整理 | `init`、`tl-request`、`instruction-ready`、`pm-review`、`audit-ready`、`triage` |
+| 実装担当 | 役割開始、途中フィードバック、PM提出 | `role-start`、`feedback`、`submit` |
+| TL | 判断完了 | `tl-complete` |
+| 監査 | 開始、結果登録 | `role-start`、`audit-result` |
+| オーナー | スコープ、開始承認、一時権限、最終終了 | `scope-lock`、`start-approve`、`approve`、`close` |
 
-```
-cd <プロジェクト>
-codex
+役割開始を明示されたAIは、各Skillに従って節目のコマンドを自発的に実行します。通常モードでは実行しません。オーナー専用コマンドをAIフック経由で実行すると拒否されます。
+
+```sh
+~/.ai-devteam/bin/flowctl status --task-dir docs/flow/<feature>/task-01
+~/.ai-devteam/bin/flowctl next --task-dir docs/flow/<feature>/task-01 --provider codex
 ```
 
-```
-あなた: $implementer
-あなた: docs/flow/login/task-01/instruction.md を読んで作業を開始してください
-実装 : （指示書・spec.md・既存コードを確認）不明点が2つあります。〜〜
-あなた: （回答する）
-実装 : docs/flow/login/task-01/pre-summary.md に実装前サマリを書き出しました。
-        （この例は認証変更なので、実装前内部検証を自動起動）
-        前提確認は「実装開始可」です。あなたの承認を待ちます
-```
+`next`は文面を表示するだけです。セッションの起動とプロンプトの貼り付けはユーザーが行います。
 
-実装担当は、同じ機能領域の類似実装と、実際の業務入口・全呼出し元・既存挙動を確認する。高リスク変更では別コンテキストの内部検証担当が、未確認の仮説、範囲過大、不完全な外部送信条件、正式ドキュメント混入を実装前に確認する。ここでの自動検証は新しいユーザー承認ゲートではない。
-指摘が出たらPMセッションへ持ち帰る:
+## 一時権限
 
-```
-あなた: （PMセッションで）実装担当から指摘が出ています。
-        task-01/pre-summary.md の指摘事項を確認してください
-PM   : 指摘は妥当です。spec.md と instruction.md を修正しました
+実credential、本番環境、共有DBは常時禁止です。隔離DB、migration、依存変更、外部ネットワークが必要な場合だけ、オーナーが対象taskへ期限付きで許可します。
+
+```sh
+~/.ai-devteam/bin/flowctl approve \
+  --task-dir docs/flow/<feature>/task-01 \
+  --role implementer \
+  --capability isolated-db \
+  --minutes 30 \
+  --reason "専用の破棄可能DBで結合テスト" \
+  --owner-confirmed
 ```
 
-★ゲート1: pre-summary.md を読み、問題なければ承認する。
+許可は工程・役割・スコープ制約を解除しません。
 
-```
-あなた: 承認します。実装に進んでください
-実装 : ブランチ作成をお願いします: git switch -c feature/login <base commit>
-あなた: （実行して）作成しました
-実装 : （Builderが実装・テスト → 内部検証担当が別コンテキストで確認
-        → 修正必要ならBuilderへ返す制限付きループ）合格しました。
-        report.md / summary.md / loop-state.md に書き出しました。
-        次はPMセッションで report.md を確認してください。
+## 指標
+
+```sh
+~/.ai-devteam/bin/flowctl metrics --task-dir docs/flow/<feature>/task-01
+~/.ai-devteam/bin/flowctl metrics --flow-root docs/flow
 ```
 
-git変更操作（add / commit / branch / push）はすべてあなたが行う。
-実装担当はループ中にも完了時にもコミットを求めず、監査依頼や監査用プロンプトも作らない。変更ファイルと推奨メッセージはreport.mdへ記録し、必ずPMへ返す。
-内部検証担当はコードを変更せず、番号付き受け入れ条件・テスト・差分・既存パターンを確認する。不合格なら根拠付きの修正票をBuilderへ返す。結果は loop-state.md に記録される。
+イベントは、有効化された役割セッションだけを対象に`task-NN/.ai-devteam/`へ追記専用で保存します。通常セッション、プロンプト本文、会話ログ、秘密情報、credentialは記録しません。
 
-### Step 3. PMが候補差分を確認し、コミット後に監査依頼を作る
+## 進行中taskへの導入
 
-```
-あなた: docs/flow/login/task-01/report.md を確認してください
-PM   : （成果物検証スクリプト、report.md・summary.md・loop-state.md、
-        未コミット差分、検証結果を突き合わせて裏取り）実装候補は問題ありません。
-        report.mdの影響欄を根拠に、PMが正式ドキュメントを更新して再照合しました。
-        implementation-review.md にコミット可判定を書き出しました。コミットしてください。
-あなた: （git add / commit を実行）コミットしました
-PM   : （確定HEAD、非空のコミット済み差分、候補差分との一致、
-        タスク範囲の未コミット変更がないことを再確認）
-        docs/flow/login/task-01/audit-request.md に監査依頼を書き出しました
-```
+新規taskはPMが`flowctl init`を行います。すでに進行中なら、PMがscope-baseline.mdとinstruction.mdを新形式に整え、オーナーがscope-lock後に安全側の工程へ取り込みます。
 
-形式不備・検証証跡不足・差分不一致・実装担当による正式ドキュメント変更があれば、PMはユーザーへ判断を求めず、具体的な修正指示を実装担当へ返す。PMが更新するのは人間向け正式ドキュメントだけで、コード・テスト・設定は変更しない。コミット前にはaudit-request.mdや監査用プロンプトを作らない。
-
-### Step 4. 監査セッションを独立して立ち上げる
-
-基本はCodexとClaudeの2監査を並列に立ち上げる。あなたがタスクごとに明示した場合だけ、どちらか1監査にできる。PMや実装担当が監査数を減らすことはできない。
-
-Codex側（新規セッション）:
-
-```
-あなた: $auditor
-あなた: docs/flow/login/task-01/audit-request.md を読んで監査してください
-監査 : docs/flow/login/task-01/audit-codex.md に書き出しました
-        監査結果: 修正必要
+```sh
+~/.ai-devteam/bin/flowctl adopt \
+  --task-dir docs/flow/<feature>/task-04 \
+  --scope-file docs/flow/<feature>/scope-baseline.md \
+  --scope-id 要求1 \
+  --risk high \
+  --branch feature/example \
+  --base <base-sha> \
+  --state implementation \
+  --pre-evaluator required \
+  --reason "新しい工程制御へ移行" \
+  --owner-confirmed
 ```
 
-Claude側（新規セッション、`claude` で起動）:
+取込み可能な状態は`planning`、`instruction_ready`、`implementation_preflight`、`implementation`、`pm_review`です。証拠が不足する場合は安全側へ戻して取り込みます。
 
-```
-あなた: /auditor
-あなた: docs/flow/login/task-01/audit-request.md を読んで監査してください
-監査 : docs/flow/login/task-01/audit-claude.md に書き出しました
-        監査結果: クローズ可
-```
+## 物理制御の範囲
 
-### Step 5. PMセッションで監査結果を整理させる
+`role-start`後のフックは、役割外ファイル、正式ドキュメントの実装担当編集、Git変更、秘密情報パス、本番・共有環境、未許可DB・migration等を直接拒否します。通常モードにはこの制御を適用しません。任意の子プロセス内部まで完全に隔離するOS sandboxではないため、Codexでは役割別プロファイルも併用します。
 
-```
-あなた: 指定した監査結果を整理してください
-PM   : docs/flow/login/task-01/audit-triage.md に整理しました。
-        今すぐ直すべき: 1件（ロック回数の境界値テスト欠落）
-        次タスクでよい: 2件 / 残リスク: 1件
+```sh
+codex -p ai-devteam-pm
+codex -p ai-devteam-implementer
+codex -p ai-devteam-review
 ```
 
-### Step 6. 修正指示 → 再監査（原則2ラウンドまで）
+`~/.codex/config.toml`に旧`sandbox_mode`設定があると新しいpermission profileが優先されません。`flowctl diagnose --project-root <project>`で状態を確認してください。既存設定はinstallerが無断で削除しません。
 
-実装担当セッションに戻る:
+## マスター構成
 
+```text
+AGENTS.md                         共通規約
+codex/skills/                    Codexの役割Skill
+codex/skills/*/agents/openai.yaml Codex Skillの明示起動ポリシー
+claude/skills/auditor/           Claude監査Skill
+claude/settings.json             静的denyを持たない参照用設定
+codex/profiles/                  Codex最小権限プロファイル
+scripts/flowctl.py               工程CLI
+scripts/flowctl_lib.py           検証・フック・指標
+scripts/validate_handoff.py      実装提出の形式検証
+tests/test_flowctl.py            回帰テスト
+scripts/install.sh               検証と配備
 ```
-あなた: docs/flow/login/task-01/audit-triage.md の修正指示に対応してください
-実装 : （修正・内部検証）report.md / summary.md / loop-state.md を更新しました。
-        次はPMセッションで report.md を確認してください。
-```
-
-PMセッションで候補差分を再確認し、PMのコミット可判定後にあなたがコミットする。PMが確定差分を確認して再監査依頼を作ったら、Step 4を繰り返す
-（再監査は前回からの差分中心。監査結果は audit-codex-2.md 等に書かれる）。
-
-### Step 7. クローズ判定 【★ゲート2】
-
-★ゲート2: あなたが指定した全監査の「今すぐ直すべき」がゼロになったら、あなたが判定する。
-
-```
-あなた: （audit-triage.md を確認して）クローズします。task-02へ進めてください
-PM   : docs/flow/login/task-02/instruction.md に書き出しました
-```
-
-以降、Step 2〜7をタスクごとに繰り返す。全タスク完了後、PMに全体整合性
-チェック（テンプレのステップ7）をさせてから、マージ・PR作成を指示する。
-
-### Step 8. 正式ドキュメントの最終整合
-
-工程ファイルは開発中の受け渡し用で、gitignore対象のためgit履歴には残らない。
-正式ドキュメントは実装担当に渡さず、各タスクのStep 3でPMが更新して同じ監査差分へ含める。機能全体のクローズ前には、PMが未反映事項をもう一度確認する。
-
-```
-あなた: （PMセッションで）正式ドキュメントの最終整合を確認してください
-PM   : 各タスクで更新済みの正式ドキュメントとspec.mdを再照合しました。
-        未反映事項はありません。最終クローズ判定へ進めます
-```
-
-技術的な記述は必要なTech Lead判断を根拠にPMが反映する。実装担当は正式ドキュメントを作成・編集・削除せず、report.mdへ更新候補と確認済み事実だけを書く。docs/flow/ の削除は行わない。
-
-### 途中でTL（Tech Lead）相談が発生した場合
-
-既存方針では決められないサービス設計・アーキテクチャ・重大なセキュリティや運用判断が残った場合だけ利用する。通常の実装方法、局所的なデバッグ、既存パターンに沿う変更では利用しない。実装担当から設計上の問題が出た場合も、まずPMが確認して相談資料へまとめる。
-
-```
-あなた: （PMセッションで）Tech Lead相談資料を作成してください
-PM   : docs/flow/login/tech-lead/jwt-aud互換性.md に書き出しました
-```
-
-新規セッションで:
-
-```
-あなた: $tl
-あなた: docs/flow/login/tech-lead/jwt-aud互換性.md を読んで判断してください
-TL   : （判断結果を同ディレクトリに書き出し）
-```
-
-PMセッションに戻り「Tech Leadの判断が出ました。〜〜-decision.md を確認して
-spec.mdへ反映してください」と伝える。
-
-### 軽量パスを使う場合
-
-小規模な変更（数ファイル・100行未満、外部IF/データ/認証に無関係、
-挙動変更なし）では、PMに軽量パスを提案させることができる:
-
-```
-あなた: $pm
-あなた: コードコメントの誤字修正です。軽量パスでお願いします
-PM   : 軽量パス条件に該当します。壁打ちを省略し、
-        docs/flow/readme-fix/task-01/instruction.md を作成しました
-```
-
-実装前サマリなしで実装へ進める。ドキュメント・コメント・空白・ドキュメント内の表示形式だけの変更で、実行時挙動等へ影響しないと指示書に明記された場合は内部検証担当も省略できる。監査は基本2件で、あなたが明示した場合だけ1件にできる。
-条件に1つでも外れる場合、PMは通常フローを要求してくる。
-
-### チートシート: あなたが打つ言葉一覧
-
-1タスク分の流れを、あなたの発言だけ抜き出したもの。迷ったらここを見る。
-
-| # | セッション | あなたが打つ言葉 | 返ってくるもの |
-|---|---|---|---|
-| 1 | PM | `$pm` → MTG決定事項を伝える | 全体像の報告と質問 |
-| 2 | PM | 「壁打ちを進めてください」→ 質問に回答 | 壁打ちの質問リスト |
-| 3 | PM | 「実装ドキュメントにまとめてください」 | spec.md |
-| 4 | PM | 「タスク分割してください」 | tasks.md |
-| 5 | PM | 「task-01の指示書を作成してください」 | task-01/instruction.md |
-| 6 | 実装 | `$implementer` → 「task-01/instruction.md を読んで作業を開始してください」 | 質問・指摘 → pre-summary.md |
-| 7 | 実装 | ★「承認します。実装に進んでください」 | Builder↔内部検証担当 → report.md / summary.md / loop-state.md → PM用プロンプト |
-| 8 | PM | 「task-01/report.md を確認してください」 | 裏取り → PMが正式文書を更新・再照合 → implementation-review.md → コミット依頼 |
-| 9 | PM | （あなたがコミット後）「コミットしました」 | 確定HEAD・非空差分を再確認 → audit-request.md |
-| 10 | 基本2監査（毎回新規） | `$auditor`（Codex）/`/auditor`（Claude） → 「task-01/audit-request.md を読んで監査してください」 | 指定した監査結果 |
-| 11 | PM | 「指定した監査結果を整理してください」 | audit-triage.md |
-| 12 | 実装 | 「task-01/audit-triage.md の修正指示に対応してください」（修正必要時のみ） | 修正・内部検証 → 成果物更新 → PMへ戻り8から再開 |
-| 13 | PM | ★「クローズします。task-02へ進めてください」 | task-02/instruction.md |
-| 14 | PM | 「正式ドキュメントの最終整合を確認してください」（機能全体のクローズ前） | spec・実装・監査済み正式文書の未反映確認 |
-
-★ = あなたの承認ゲート。6〜13をタスクごとに繰り返し、14で最終整合を確認する。正式ドキュメントの更新自体は各タスクの8でPMが行う。
-
-### よくある質問
-
-- **PMの回答を実装担当へコピペする必要は？** → ない。すべてファイル経由。
-  あなたが運ぶのはパス1行だけ
-- **セッションを閉じてしまったら？** → 成果物はすべて docs/flow/ にあるので、
-  同じ役割プロンプトで立ち上げ直し「docs/flow/<機能名>/ を読んで状況を
-  把握してください」から再開できる
-- **docs/flow はコミットしなくていい？** → 不要（gitignore対象）。ただしローカルに
-  しか無いので、恒久的に必要な内容は各タスクのコミット前にPMが正式ドキュメントへ反映する
-- **正式ドキュメントは誰が変更する？** → PM。実装担当は変更せず、report.mdへ影響と確認済み事実を記録する。技術設計・セキュリティ等は必要なTech Lead判断をPMが反映する
-- **監査セッションを使い回していい？** → 不可。監査は毎回新規で立ち上げる
-  （独立性の担保）。再監査も新規セッションでよい
-- **PMが実装や監査をサブエージェントで進めてよい？** → 不可。役割内の補助には使えるが、役割間の移動はあなたが独立セッションを開始する
-- **内部検証担当は3つ目の監査？** → 違う。実装担当内の読み取り専用品質ゲートで、正式監査には数えない
-- **内部検証担当を毎回指示する必要がある？** → 不要。コード・テスト・設定等の変更では実装担当が自動起動し、合格前はPM提出へ進まない
-- **実装担当がコミットや監査開始を案内したら？** → その案内は無効。PMへreport.mdを渡し、PMの候補差分確認から再開する
-- **機能開発の途中でテンプレを改訂したら？** → install.shを再実行し、継続中の役割セッションに最新の役割Skillと共通規約を読み直させて現在の成果物から再開する
-
-## 運用ルールの要点
-
-- **監査の一次ソースはPMのspec.md。** 実装担当のsummary.mdは「実装側の主張」として突き合わせる
-- **監査境界は `git diff <base>..<確定HEAD>`。** 監査依頼にブランチ名・base commit・PMが確認した確定HEADを必ず書く。空の差分やタスク範囲の未コミット変更がある状態では監査を開始しない
-- **クローズ条件は「今すぐ直すべき」ゼロ＋あなたの判定。** 監査は原則2ラウンドまで、3ラウンド目はTech Lead相談へ
-- **PMは実装・テスト・設定を変更しない。** docs/flow配下のPM成果物と人間向け正式ドキュメントを担当し、製品コード等の修正は実装担当へ返す
-- **git変更操作はすべてオーナー（あなた）が行う。** PM / TL / 実装担当 / 監査のいずれもadd・commit・branch作成・checkout・pushを実行しない。実装担当は成果物をPMへ提出し、候補差分を確認したPMだけがコミットを依頼する。読み取り（status / log / diff）はAIも可
-- **PMは成果物を機械検証してから判断する。** summary.mdの必須タグ、実装前・実装後の内部検証証跡、正式ドキュメント影響欄は`validate_handoff.py`で確認し、不足があれば自動で実装担当へ差し戻す
-- **軽量パス**（小規模・外部IF/データ/認証に無関係・挙動変更なし）はPMテンプレの条件を満たし、あなたが承認した場合のみ。壁打ち・実装前サマリを省略できる
-- **監査はCodexとClaudeの独立2監査が基本。** あなたがタスクごとに明示した場合だけ1監査にできる
-- **監査セッションは毎回新規で立ち上げる**（再監査で前回指摘との差分を見る場合を除く）
-- **実装担当は既存パターンと実際の業務入口・全呼出し元を調査し、別コンテキストの内部検証担当で制限付きループを行う。** 高リスクでは実装前にも自動確認し、未確定の通知・外部送信や誤った前提を実装へ増幅しない。内部検証は正式監査ではない
-- **TLは上流の重大判断だけを扱う。** 技術要素が含まれるという理由だけで呼ばず、既存方針で決められない設計・セキュリティ・運用リスクをまとめて相談する
-- **規約ファイルと工程ファイルはgitignoreする。** `/AGENTS.md` `/CLAUDE.md` `/docs/flow/` はコミットしない（`.claude/settings.json` はガードレールなのでコミットする）。工程記録がgit履歴に残らないぶん、各タスクのコミット前にPMが正式ドキュメントを更新し、監査差分へ含める。docs/flow/ の削除は行わない
-- **成果物と報告は人間が読める日本語で書く。** `M1` `F1` のようなその場限りの略号を禁止し、指摘は「通し番号＋内容の要約」で書かせる。分類は「今すぐ直すべき」「次タスクでよい」「残リスクとして受け入れる」の日本語ラベルのまま扱う（AGENTS.mdの「表現ルール」）
-- **重要ルールはプロンプトだけでなく設定で強制する。** git変更操作の禁止は `.claude/settings.json` のdenyとCodexのサンドボックス設定で物理的にブロックし、品質検証はCI（テスト・lint・型チェック必須）で担保する

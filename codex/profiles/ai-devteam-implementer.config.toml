@@ -1,0 +1,30 @@
+default_permissions = "ai-devteam-implementer"
+
+[permissions.ai-devteam-implementer]
+description = "ai-devteam implementer: workspace write, formal docs read-only, no network"
+extends = ":workspace"
+
+[permissions.ai-devteam-implementer.filesystem]
+glob_scan_max_depth = 6
+
+[permissions.ai-devteam-implementer.filesystem.":workspace_roots"]
+"docs" = "read"
+"docs/flow" = "write"
+"doc" = "read"
+"adr" = "read"
+"ADR" = "read"
+"AGENTS.md" = "read"
+"CLAUDE.md" = "read"
+"README" = "read"
+"README.md" = "read"
+"CHANGELOG" = "read"
+"CHANGELOG.md" = "read"
+".codex" = "read"
+".claude" = "read"
+"**/.env" = "deny"
+"**/.env.*" = "deny"
+"**/*.pem" = "deny"
+"**/*.key" = "deny"
+
+[permissions.ai-devteam-implementer.network]
+enabled = false
