@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import uuid
@@ -27,6 +28,7 @@ from flowctl_lib import (
     calculate_metrics,
     current_audit_round,
     current_state,
+    document_policy,
     find_managed_root,
     git_output,
     git_root,
@@ -43,6 +45,7 @@ from flowctl_lib import (
     metrics_markdown,
     normalize_relative,
     parse_instruction,
+    parse_owner_approval_summary,
     parse_scope_baseline,
     policy_path,
     product_diff_digest,
@@ -70,11 +73,84 @@ from flowctl_lib import (
 )
 
 
-VERSION = "2.1.0"
+VERSION = "2.5.0"
 
 
 def task_path(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def document_task_root(task_dir: Path) -> Path:
+    root = find_managed_root(task_dir)
+    if root is None or not task_dir.is_dir():
+        raise FlowError("対象リポジトリと既存のtaskディレクトリを確認してください")
+    try:
+        relative = task_dir.relative_to(root / "docs" / "flow")
+    except ValueError as error:
+        raise FlowError("task-dirは対象プロジェクトのdocs/flow配下を指定してください") from error
+    if not relative.parts:
+        raise FlowError("docs/flow直下ではなく対象機能またはtaskを指定してください")
+    return root
+
+
+def discover_flow_documents(directory: Path) -> list[dict[str, Any]]:
+    """List handoff entry points only, without traversing products or Git history."""
+    root = find_managed_root(directory)
+    if root is not None:
+        candidates = [root]
+    elif (directory / "docs" / "flow").is_dir():
+        candidates = [directory]
+    elif directory.is_dir():
+        candidates = sorted(path for path in directory.iterdir() if path.is_dir() and not path.is_symlink())
+    else:
+        raise FlowError("project-rootが存在しません")
+    result = []
+    for candidate in candidates:
+        flow = candidate / "docs" / "flow"
+        if not flow.is_dir() or flow.is_symlink():
+            continue
+        for feature in sorted(flow.iterdir()):
+            if not feature.is_dir() or feature.is_symlink() or feature.name.startswith("."):
+                continue
+            tasks = []
+            for task in sorted(feature.iterdir()):
+                if not task.is_dir() or task.is_symlink() or task.name.startswith(".") or task.name == "tech-lead":
+                    continue
+                artifacts = sorted(
+                    str(path) for path in task.glob("*.md")
+                    if not path.is_symlink() and path.is_file()
+                    and path.name.startswith(("instruction", "report", "summary", "audit-", "loop-state"))
+                )
+                if artifacts or policy_path(task).is_file():
+                    tasks.append({
+                        "task_dir": str(task),
+                        "workflow": "managed" if policy_path(task).is_file() else "documents",
+                        "recorded_state": current_state(load_events(task)) if policy_path(task).is_file() else None,
+                        "artifacts": artifacts,
+                    })
+            result.append({
+                "project_root": str(candidate), "feature_dir": str(feature),
+                "entrypoints": [str(feature / name) for name in ("tasks.md", "spec.md", "instruction.md") if (feature / name).is_file()],
+                "tasks": tasks,
+            })
+    return result
+
+
+def flowctl_command_block(
+    subcommand: str,
+    options: Sequence[tuple[str, str | Path | int | None]],
+) -> str:
+    """Render a terminal-safe command without relying on visual line wrapping."""
+    rows = []
+    for flag, value in options:
+        rows.append(flag if value is None else f"{flag} {shlex.quote(str(value))}")
+    lines = [f"~/.ai-devteam/bin/flowctl {subcommand}"]
+    if rows:
+        lines[0] += " \\"
+        for index, row in enumerate(rows):
+            suffix = " \\" if index < len(rows) - 1 else ""
+            lines.append(f"  {row}{suffix}")
+    return "```sh\n" + "\n".join(lines) + "\n```"
 
 
 def ensure_sha(value: str, label: str) -> str:
@@ -98,10 +174,43 @@ def validate_branch_and_base(task_dir: Path, branch: str, base: str) -> None:
         raise FlowError(f"base commitが存在しません: {base}")
 
 
-def cmd_scope_lock(args: argparse.Namespace) -> int:
-    if not args.owner_confirmed:
-        raise FlowError("スコープ固定には --owner-confirmed が必要です")
-    scope_file = Path(args.scope_file).expanduser().resolve()
+def print_scope_lock_owner_receipt(
+    requirements: dict[str, dict[str, Any]],
+    owner_summary: dict[str, str],
+    audits: int,
+    single_auditor: str | None,
+) -> None:
+    print("オーナー承認記録:")
+    for requirement_id, requirement in sorted(requirements.items()):
+        print(f"- {requirement_id}: {requirement['outcome']}")
+        print(
+            "  範囲: "
+            + "、".join(requirement["write_globs"])
+            + f" / リスク: {requirement['risk_level']} / 上限: "
+            + f"{requirement['max_files']}ファイル・{requirement['max_changed_lines']}行"
+        )
+    print(f"- 範囲・上限の理由: {owner_summary['scope_reason']}")
+    print(f"- 分割・移行判断: {owner_summary['transition_decision']}")
+    if audits == 1:
+        print(f"- 監査: 1件（{single_auditor}）")
+    else:
+        print("- 監査: 独立2監査（Codex・Claude）")
+    print("- この操作で固定するもの: 上記の成果、変更可能パス、リスク、上限、監査数")
+    print("- この操作だけでは許可しないこと: Git、DB・migration実行、外部サービス操作。実装はPMの指示書ゲート合格後だけです")
+
+
+def prepare_scope_lock(
+    scope_file_value: str,
+    audits: int,
+    single_auditor: str | None,
+) -> dict[str, Any]:
+    """Read-only validation shared by scope-check and scope-lock.
+
+    The PM can run this before asking the owner for a command.  scope-lock calls
+    it again so a changed file or lock between the check and approval is never
+    accepted on the strength of stale output.
+    """
+    scope_file = Path(scope_file_value).expanduser().resolve()
     root = find_managed_root(scope_file)
     if root is None:
         raise FlowError("ai-devteam管理対象プロジェクトを特定できません")
@@ -114,30 +223,102 @@ def cmd_scope_lock(args: argparse.Namespace) -> int:
     requirements, errors = parse_scope_baseline(scope_file)
     if errors:
         raise FlowError("スコープ基準に不備があります:\n- " + "\n- ".join(errors))
-    if args.audits == 1 and args.single_auditor not in AUDITORS:
+    if audits == 1 and single_auditor not in AUDITORS:
         raise FlowError("1監査では --single-auditor codex|claude が必要です")
-    if args.audits == 2 and args.single_auditor:
+    if audits == 2 and single_auditor:
         raise FlowError("2監査では --single-auditor を指定しません")
+    owner_summary, owner_errors = parse_owner_approval_summary(scope_file)
     path = scope_lock_path(scope_file)
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing.get("active"):
-            if existing.get("sha256") == sha256_file(scope_file):
-                same_audit_policy = (
-                    int(existing.get("audit_count", 2)) == args.audits
-                    and existing.get("single_auditor") == args.single_auditor
-                )
-                if same_audit_policy:
-                    print("scope lock: already current")
-                    return 0
+            if existing.get("sha256") != sha256_file(scope_file):
+                raise FlowError("既存スコープは固定中です。変更前にscope-unlockが必要です")
+            same_audit_policy = (
+                int(existing.get("audit_count", 2)) == audits
+                and existing.get("single_auditor") == single_auditor
+            )
+            if not same_audit_policy:
                 raise FlowError("監査数・監査担当も固定中です。変更前にscope-unlockが必要です")
-            raise FlowError("既存スコープは固定中です。変更前にscope-unlockが必要です")
+            if "owner_summary" not in existing:
+                return {
+                    "scope_file": scope_file,
+                    "relative": relative,
+                    "requirements": requirements,
+                    "owner_summary": None,
+                    "path": path,
+                    "status": "legacy-current",
+                }
+            if owner_errors:
+                raise FlowError("オーナー承認サマリに不備があります:\n- " + "\n- ".join(owner_errors))
+            return {
+                "scope_file": scope_file,
+                "relative": relative,
+                "requirements": requirements,
+                "owner_summary": owner_summary,
+                "path": path,
+                "status": "already-current",
+            }
+    if owner_errors:
+        raise FlowError("オーナー承認サマリに不備があります:\n- " + "\n- ".join(owner_errors))
+    return {
+        "scope_file": scope_file,
+        "relative": relative,
+        "requirements": requirements,
+        "owner_summary": owner_summary,
+        "path": path,
+        "status": "ready-to-lock",
+    }
+
+
+def cmd_scope_check(args: argparse.Namespace) -> int:
+    prepared = prepare_scope_lock(args.scope_file, args.audits, args.single_auditor)
+    status = prepared["status"]
+    if status == "legacy-current":
+        print("scope check: legacy active（既存固定は有効です。オーナー操作は不要です）")
+        return 0
+    print_scope_lock_owner_receipt(
+        prepared["requirements"], prepared["owner_summary"], args.audits, args.single_auditor
+    )
+    if status == "already-current":
+        print("scope check: already current（オーナー操作は不要です）")
+    else:
+        print("scope check: PASS（内容を承認する場合だけscope-lockを実行してください）")
+        options: list[tuple[str, str | Path | int | None]] = [
+            ("--scope-file", prepared["scope_file"]),
+            ("--audits", args.audits),
+        ]
+        if args.single_auditor:
+            options.append(("--single-auditor", args.single_auditor))
+        options.append(("--owner-confirmed", None))
+        print("\nオーナーが内容を承認する場合のコピペ用コマンド:")
+        print(flowctl_command_block("scope-lock", options))
+    return 0
+
+
+def cmd_scope_lock(args: argparse.Namespace) -> int:
+    if not args.owner_confirmed:
+        raise FlowError("スコープ固定には --owner-confirmed が必要です")
+    prepared = prepare_scope_lock(args.scope_file, args.audits, args.single_auditor)
+    scope_file = prepared["scope_file"]
+    relative = prepared["relative"]
+    requirements = prepared["requirements"]
+    owner_summary = prepared["owner_summary"]
+    path = prepared["path"]
+    if prepared["status"] == "legacy-current":
+        print("scope lock: legacy active（既存固定はそのまま有効です。再固定時からオーナー承認サマリが必要です）")
+        return 0
+    if prepared["status"] == "already-current":
+        print_scope_lock_owner_receipt(requirements, owner_summary, args.audits, args.single_auditor)
+        print("scope lock: already current")
+        return 0
     value = {
         "schema_version": 1,
         "active": True,
         "scope_file": relative,
         "sha256": sha256_file(scope_file),
         "requirements": requirements,
+        "owner_summary": owner_summary,
         "audit_count": args.audits,
         "single_auditor": args.single_auditor,
         "locked_at": iso_now(),
@@ -146,6 +327,7 @@ def cmd_scope_lock(args: argparse.Namespace) -> int:
     history = path.parent / "scope-lock-events"
     history.mkdir(parents=True, exist_ok=True)
     atomic_write_json(history / f"{utc_now().strftime('%Y%m%dT%H%M%S%fZ')}-locked.json", value)
+    print_scope_lock_owner_receipt(requirements, owner_summary, args.audits, args.single_auditor)
     print(f"scope lock: PASS ({len(requirements)} requirements)")
     print(path)
     return 0
@@ -199,45 +381,22 @@ def refresh_policy_scope(task_dir: Path, policy: dict[str, Any]) -> dict[str, An
     return policy
 
 
-def ensure_pre_evaluator_evidence(task_dir: Path, policy: dict[str, Any]) -> None:
-    if not policy.get("pre_evaluator_required"):
-        return
-    loop_state = task_dir / "loop-state.md"
-    evidence = loop_state.read_text(encoding="utf-8") if loop_state.is_file() else ""
-    required_markers = (
-        "## 実装前検証証跡",
-        "実施方式: 別コンテキストのサブエージェント",
-        "最終判定: 実装開始可",
-        "実装開始前のプロダクト差分: なし",
-    )
-    missing = [marker for marker in required_markers if marker not in evidence]
-    if missing:
-        raise FlowError("必須の実装前内部検証証跡が不足しています: " + "、".join(missing))
-    previous = policy.get("pre_evaluator_sha_before_scope_change")
-    if previous and sha256_file(loop_state) == previous:
-        raise FlowError("スコープ再承認後の実装前内部検証を新しい差分で再実施してください")
-
-
 def cmd_init(args: argparse.Namespace) -> int:
     task_dir = task_path(args.task_dir)
-    if not task_dir.is_dir():
-        raise FlowError(f"task-dirが存在しません: {task_dir}")
+    if task_dir.exists() and not task_dir.is_dir():
+        raise FlowError(f"task-dirにディレクトリ以外が存在します: {task_dir}")
     if policy_path(task_dir).exists():
         raise FlowError("このtask-dirは既に初期化済みです。既存policyを上書きしません")
-    if args.risk == "high" and args.pre_evaluator == "not-required":
-        raise FlowError("高リスクタスクは実装前内部検証を省略できません")
-    if args.risk == "high" and args.pre_summary == "not-required":
-        raise FlowError("高リスクタスクは実装前サマリを省略できません")
     if args.risk == "high" and args.tl == "not-required" and not args.tl_reason:
         raise FlowError("高リスクでTL不要とする場合は --tl-reason が必要です")
     if args.tl == "required" and not args.tl_reason:
         raise FlowError("TL相談の論点を --tl-reason で記録してください")
 
-    base = ensure_sha(args.base, "base commit")
-    validate_branch_and_base(task_dir, args.branch, base)
     scope_file = Path(args.scope_file).expanduser().resolve()
     if task_dir.parent.resolve() != scope_file.parent.resolve():
         raise FlowError("task-dirとscope-baseline.mdは同じ機能ディレクトリ配下にしてください")
+    base = ensure_sha(args.base, "base commit")
+    validate_branch_and_base(scope_file.parent, args.branch, base)
     scope_lock = validate_scope_lock(scope_file)
     audit_count = int(scope_lock.get("audit_count", 2))
     single_auditor = scope_lock.get("single_auditor")
@@ -250,7 +409,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise FlowError(f"固定済みスコープに要求IDがありません: {args.scope_id}")
     if scope_requirement.get("risk_level") != args.risk:
         raise FlowError("リスク区分はオーナーがscope-lock時に固定した値と一致させてください")
-    root = git_root(task_dir)
+    root = git_root(scope_file.parent)
     policy = {
         "schema_version": 1,
         "created_at": iso_now(),
@@ -265,15 +424,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         "scope_requirement": {"id": args.scope_id, **scope_requirement},
         "tl_required": args.tl == "required",
         "tl_reason": safe_summary(args.tl_reason) if args.tl_reason else "既存方針内で判断可能",
-        "pre_evaluator_required": args.pre_evaluator == "required" or args.risk == "high",
+        "pre_evaluator_required": False,
         "pre_summary_required": args.pre_summary == "required",
-        "post_evaluator_required": True,
+        "post_evaluator_required": args.risk == "high",
+        "verification_evidence_required": True,
         "formal_doc_globs": sorted(set(args.formal_doc or [])),
         "generated_doc_globs": sorted(set(args.generated_doc or [])),
         "allowed_write_globs": [],
         "instruction_sha256": None,
         "pm_formal_doc_snapshots": {},
     }
+    task_dir.mkdir(exist_ok=True)
     task_meta_dir(task_dir).mkdir(parents=True, exist_ok=False)
     save_policy(task_dir, policy)
     with task_lock(task_dir):
@@ -311,10 +472,6 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         raise FlowError(f"固定済みスコープに要求IDがありません: {args.scope_id}")
     if requirement.get("risk_level") != args.risk:
         raise FlowError("リスク区分はオーナーがscope-lock時に固定した値と一致させてください")
-    if args.risk == "high" and args.pre_evaluator == "not-required":
-        raise FlowError("高リスクタスクは実装前内部検証を省略できません")
-    if args.risk == "high" and args.pre_summary == "not-required":
-        raise FlowError("高リスクタスクは実装前サマリを省略できません")
     root = git_root(task_dir)
     policy = {
         "schema_version": 1,
@@ -331,9 +488,12 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         "scope_requirement": {"id": args.scope_id, **requirement},
         "tl_required": False,
         "tl_reason": "取込み前の既存判断を継承。新しい上流判断はplanningへ戻す",
-        "pre_evaluator_required": args.pre_evaluator == "required" or args.risk == "high",
+        "pre_evaluator_required": False,
         "pre_summary_required": args.pre_summary == "required",
-        "post_evaluator_required": True,
+        "post_evaluator_required": args.risk == "high",
+        # 進行中taskの取込みでは既存成果物の形式を後付けで壊さない。
+        # 新規init taskだけが再現可能な検証コマンドを必須にする。
+        "verification_evidence_required": False,
         "formal_doc_globs": sorted(set(args.formal_doc or [])),
         "generated_doc_globs": sorted(set(args.generated_doc or [])),
         "allowed_write_globs": [],
@@ -350,8 +510,6 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         pre_summary = task_dir / "pre-summary.md"
         if not pre_summary.is_file() or not pre_summary.read_text(encoding="utf-8").strip():
             raise FlowError("指定工程への取込みには既存pre-summary.mdが必要です")
-    if args.state in {"implementation", "pm_review"}:
-        ensure_pre_evaluator_evidence(task_dir, policy)
     if args.state == "pm_review":
         run_handoff_validator(task_dir, Path(args.validator).resolve() if args.validator else None)
         scope_errors = validate_implementation_scope(task_dir, policy)
@@ -495,18 +653,24 @@ def cmd_instruction_ready(args: argparse.Namespace) -> int:
         policy = refresh_policy_scope(task_dir, load_policy(task_dir))
         events = load_events(task_dir)
         state = current_state(events)
-        if state not in {"planning", "implementation_paused"}:
-            raise FlowError(f"instruction-readyはplanningまたは範囲変更停止からだけ実行できます: {state}")
+        if state not in {"planning", "implementation_paused", "implementation", "pm_review", "audit_triage"}:
+            raise FlowError(f"この工程では指示書を発行できません: {state}")
+        if state in {"implementation", "pm_review", "audit_triage"} and sha256_file(task_dir / "instruction.md") == policy.get("instruction_sha256"):
+            raise FlowError("既存taskの指示更新がありません。工程を再演せず現在の成果物を利用してください")
         pause = latest_event(events, "transition") if state == "implementation_paused" else None
         if state == "implementation_paused" and (
             not pause
-            or pause.get("data", {}).get("classification") not in {"scope-change", "tl-review"}
+            or pause.get("data", {}).get("classification") not in {
+                "scope-change",
+                "tl-review",
+                "preflight-return",
+            }
         ):
-            raise FlowError("停止指示による一時停止はPMの指示書更新では再開できません")
+            raise FlowError("この一時停止はPMの指示書更新では再開できません")
         if state == "implementation_paused" and sha256_file(task_dir / "instruction.md") == pause.get(
             "data", {}
         ).get("instruction_sha256_at_pause"):
-            raise FlowError("範囲変更後のinstruction.md更新が確認できません")
+            raise FlowError("PM差し戻し後のinstruction.md更新が確認できません")
         if policy.get("tl_required") and not latest_event(events, "tl_decision_recorded"):
             raise FlowError("必須のTech Lead判断証跡がありません")
         scope_change = latest_event(events, "scope_change_required")
@@ -517,6 +681,13 @@ def cmd_instruction_ready(args: argparse.Namespace) -> int:
             raise FlowError("指示書品質ゲートに不合格です:\n- " + "\n- ".join(errors))
         policy["allowed_write_globs"] = allowed
         policy["instruction_sha256"] = sha256_file(task_dir / "instruction.md")
+        candidate_errors = validate_implementation_scope(task_dir, policy)
+        if candidate_errors:
+            raise FlowError(
+                "候補差分の事前検証に不合格です。オーナー操作は不要です:\n- "
+                + "\n- ".join(candidate_errors)
+            )
+        policy["instruction_ready_candidate_diff_sha256"] = product_diff_digest(task_dir, policy)
         if state == "implementation_paused":
             pre_summary = task_dir / "pre-summary.md"
             loop_state = task_dir / "loop-state.md"
@@ -561,40 +732,49 @@ def cmd_role_start(args: argparse.Namespace) -> int:
         print("task未関連付け。task-dirが確定したらrole-startを同じ役割で再実行してください")
         return 0
     task_dir = task_path(args.task_dir)
+    if not policy_path(task_dir).is_file():
+        document_task_root(task_dir)
+        if args.role == "implementer":
+            document_policy(task_dir)
+        if args.role.startswith("auditor-"):
+            record = recent_runtime_record(args.role, task_dir)
+            expected = args.role.removeprefix("auditor-")
+            if not record or record.get("provider") != expected or (args.provider and args.provider != expected):
+                raise FlowError("独立監査はproviderの一致する別セッションのlifecycle hookが必要です")
+            if not (task_dir / "audit-request.md").is_file():
+                raise FlowError("PMのaudit-request.mdが必要です。監査対象を推測しないでください")
+        print(f"role-start: {args.role} (documents)")
+        print("既存資料を使う文書運用です。工程の初期化は不要です。役割と安全境界を継続してください")
+        if args.role.startswith("auditor-"):
+            print("役割登録は監査範囲の合格ではありません。監査依頼と確定Git差分の開始条件を確認してください")
+        return 0
     record = recent_runtime_record(args.role, task_dir)
-    provider = args.provider or (record.get("provider") if record else None)
+    if record and args.provider and args.provider != record.get("provider"):
+        raise FlowError("hookが記録したproviderと--providerが一致しません")
+    provider = (record.get("provider") if record else None) or args.provider
     session_id = record.get("session_id") if record else f"manual-{uuid.uuid4().hex}"
     if record is None:
-        append_event(
-            task_dir,
-            "session_started",
-            role=args.role,
-            provider=provider,
-            session_id=session_id,
-            data={"span_id": session_id, "measurement": "manual-start-only"},
-        )
-        print("warning: lifecycle hook未検出。セッション時間は開始時刻のみ記録します", file=sys.stderr)
+        if args.role.startswith("auditor-"):
+            raise FlowError("独立監査はlifecycle hookが検出できる新しい監査セッションで開始してください")
+        print("warning: lifecycle hook未検出。セッション数・稼働時間は記録しません", file=sys.stderr)
 
     with task_lock(task_dir):
         events = load_events(task_dir)
         state = current_state(events)
         if args.role == "implementer":
             if state == "instruction_ready":
-                destination = (
-                    "implementation_preflight"
-                    if load_policy(task_dir).get("pre_summary_required", True)
-                    else "implementation"
-                )
                 transition(
                     task_dir,
                     {"instruction_ready"},
-                    destination,
+                    "implementation_preflight",
                     role="implementer",
                     provider=provider,
                     session_id=session_id,
-                    reason="実装担当セッション開始",
+                    reason="既存調査サマリの軽量確認を開始",
                 )
-            elif state not in {"implementation_preflight", "implementation"}:
+            elif state == "implementation_preflight":
+                pass
+            elif state != "implementation":
                 raise FlowError(f"実装担当を開始できる工程ではありません: {state}")
         elif args.role == "tl":
             if state != "tl_review":
@@ -607,8 +787,17 @@ def cmd_role_start(args: argparse.Namespace) -> int:
         elif args.role.startswith("auditor-"):
             auditor = args.role.removeprefix("auditor-")
             start_audit(task_dir, auditor, provider, session_id)
-        elif args.role == "pm" and state in {"closed", None}:
+        elif args.role == "pm" and state is None:
             raise FlowError(f"PMを開始できる工程ではありません: {state or '未初期化'}")
+        if record is None:
+            append_event(
+                task_dir,
+                "session_measurement_unavailable",
+                role=args.role,
+                provider=provider,
+                session_id=session_id,
+                data={"reason": "lifecycle-hook-not-detected"},
+            )
     print(f"role-start: PASS ({args.role}, state={current_state(load_events(task_dir))})")
     return 0
 
@@ -617,30 +806,119 @@ def cmd_start_approve(args: argparse.Namespace) -> int:
     if not args.owner_confirmed:
         raise FlowError("実装開始承認には --owner-confirmed が必要です")
     task_dir = task_path(args.task_dir)
-    pre_summary = task_dir / "pre-summary.md"
-    if not pre_summary.is_file() or not pre_summary.read_text(encoding="utf-8").strip():
-        raise FlowError("実装開始承認にはpre-summary.mdが必要です")
+    with task_lock(task_dir):
+        state = current_state(load_events(task_dir))
+        if state == "implementation":
+            print("implementation start: already active (legacy command ignored)")
+            return 0
+        append_event(
+            task_dir,
+            "owner_command_rejected",
+            role="owner",
+            data={"command": "start-approve", "reason_code": "command-retired"},
+        )
+    raise FlowError(
+        "start-approveは廃止しました。オーナー操作は不要です。"
+        "同じ実装担当セッションでpre-summary.mdを整え、flowctl preflight-completeを実行してください"
+    )
+
+
+def cmd_preflight_complete(args: argparse.Namespace) -> int:
+    """Confirm the lightweight existing-pattern survey without owner approval."""
+    task_dir = task_path(args.task_dir)
     with task_lock(task_dir):
         policy = refresh_policy_scope(task_dir, load_policy(task_dir))
         if current_state(load_events(task_dir)) != "implementation_preflight":
-            raise FlowError("implementation_preflightからだけ実装開始を承認できます")
-        previous_summary = policy.get("pre_summary_sha_before_scope_change")
-        if previous_summary and sha256_file(pre_summary) == previous_summary:
-            raise FlowError("スコープ再承認後の内容でpre-summary.mdを更新してください")
-        ensure_pre_evaluator_evidence(task_dir, policy)
+            raise FlowError("implementation_preflightからだけ実装前確認を完了できます")
+        errors = validate_pre_summary(task_dir)
+        baseline_digest = policy.get("instruction_ready_candidate_diff_sha256")
+        current_digest = product_diff_digest(task_dir, policy)
+        if baseline_digest and current_digest != baseline_digest:
+            errors.append("instruction-ready後にプロダクト候補差分が変わっています")
+        if not baseline_digest:
+            loop_state = task_dir / "loop-state.md"
+            legacy_text = loop_state.read_text(encoding="utf-8") if loop_state.is_file() else ""
+            decisions = re.findall(r"最終判定\s*[:：]\s*(PM差し戻し|実装開始可)", legacy_text)
+            if decisions and decisions[-1] == "PM差し戻し":
+                summary = "旧実装前検証のPM差し戻しが未解消"
+                append_event(
+                    task_dir,
+                    "owner_feedback",
+                    role="implementer",
+                    data={"classification": "preflight-return", "summary": summary},
+                )
+                transition(
+                    task_dir,
+                    {"implementation_preflight"},
+                    "implementation_paused",
+                    role="implementer",
+                    reason="旧実装前検証の差し戻しをPMへ戻す",
+                    extra={
+                        "classification": "preflight-return",
+                        "instruction_sha256_at_pause": policy.get("instruction_sha256"),
+                        "scope_sha256_at_pause": policy.get("scope_sha256"),
+                        "candidate_diff_sha256_at_pause": current_digest,
+                        "resume_state": "implementation_preflight",
+                    },
+                )
+                print("legacy preflight return: PMへ自動で戻しました。オーナー操作は不要です")
+                return 0
+        errors.extend(validate_implementation_scope(task_dir, policy))
+        if errors:
+            raise FlowError(
+                "軽量実装前確認に未解決事項があります:\n- "
+                + "\n- ".join(errors)
+            )
         policy.pop("pre_summary_sha_before_scope_change", None)
         policy.pop("pre_evaluator_sha_before_scope_change", None)
         save_policy(task_dir, policy)
-        append_event(task_dir, "implementation_start_approved", role="owner", data={"pre_summary_sha256": sha256_file(pre_summary)})
+        append_event(
+            task_dir,
+            "implementation_preflight_completed",
+            role="implementer",
+            data={
+                "candidate_diff_sha256": product_diff_digest(task_dir, policy),
+                "owner_approval_required": False,
+            },
+        )
         transition(
             task_dir,
             {"implementation_preflight"},
             "implementation",
-            role="owner",
-            reason="オーナーが実装前サマリを承認",
+            role="implementer",
+            reason="既存パターン調査と開始時差分不変を確認",
         )
-    print("implementation start: APPROVED")
+    print("lightweight implementation preflight: PASS (implementation)")
     return 0
+
+
+def validate_pre_summary(task_dir: Path) -> list[str]:
+    path = task_dir / "pre-summary.md"
+    if not path.is_file():
+        return ["pre-summary.mdがありません"]
+    text = path.read_text(encoding="utf-8")
+    required = ("既存パターン", "予定差分", "検証方法", "未解決事項")
+    values = {
+        label: re.findall(
+            rf"^[ \t]*[-*]?[ \t]*{label}[ \t]*[:：][ \t]*(.*)$",
+            text,
+            re.MULTILINE,
+        )
+        for label in required
+    }
+    missing = [label for label, matches in values.items() if not matches]
+    if missing:
+        return ["pre-summary.mdに必要な項目がありません: " + "、".join(missing)]
+    empty = [
+        label
+        for label in ("既存パターン", "予定差分", "検証方法")
+        if values[label][-1].strip() in {"", "なし", "不明", "未確認"}
+    ]
+    if empty:
+        return ["pre-summary.mdの内容が空または未確認です: " + "、".join(empty)]
+    if values["未解決事項"][-1].strip() != "なし":
+        return ["未解決事項があるため実装を開始できません。PMへ戻してください"]
+    return []
 
 
 def cmd_feedback(args: argparse.Namespace) -> int:
@@ -648,8 +926,10 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     summary = safe_summary(args.summary)
     with task_lock(task_dir):
         state = current_state(load_events(task_dir))
-        if state != "implementation":
-            raise FlowError(f"実装中フィードバックを記録できる工程ではありません: {state}")
+        if state not in {"implementation_preflight", "implementation"}:
+            raise FlowError(f"実装前・実装中フィードバックを記録できる工程ではありません: {state}")
+        if args.kind == "preflight-return" and state != "implementation_preflight":
+            raise FlowError("preflight-returnはimplementation_preflightでだけ記録できます")
         policy = load_policy(task_dir)
         append_event(
             task_dir,
@@ -657,7 +937,13 @@ def cmd_feedback(args: argparse.Namespace) -> int:
             role="implementer",
             data={"classification": args.kind, "summary": summary},
         )
-        if args.kind in {"scope-change", "tl-review", "stop"}:
+        if args.kind in {
+            "scope-change",
+            "tl-review",
+            "preflight-return",
+            "stop",
+            "tooling-blocker",
+        }:
             if args.kind == "scope-change":
                 append_event(
                     task_dir,
@@ -665,9 +951,19 @@ def cmd_feedback(args: argparse.Namespace) -> int:
                     role="implementer",
                     data={"old_scope_sha256": policy.get("scope_sha256"), "summary": summary},
                 )
+            if args.kind == "tooling-blocker":
+                append_event(
+                    task_dir,
+                    "tooling_blocker_detected",
+                    role="implementer",
+                    data={
+                        "candidate_diff_sha256": product_diff_digest(task_dir, policy),
+                        "summary": summary,
+                    },
+                )
             transition(
                 task_dir,
-                {"implementation"},
+                {state},
                 "implementation_paused",
                 role="implementer",
                 reason="オーナーフィードバックで一時停止",
@@ -675,10 +971,16 @@ def cmd_feedback(args: argparse.Namespace) -> int:
                     "classification": args.kind,
                     "instruction_sha256_at_pause": policy.get("instruction_sha256"),
                     "scope_sha256_at_pause": policy.get("scope_sha256"),
+                    "candidate_diff_sha256_at_pause": product_diff_digest(task_dir, policy),
+                    "resume_state": state,
                 },
             )
     if args.kind in {"question", "correction"}:
         print("feedback: 記録済み。現在の実装担当セッションで継続できます")
+    elif args.kind == "tooling-blocker":
+        print("feedback: ツール起因として停止しました。スコープは変更しません。解消後は同じ実装担当セッションでresumeできます")
+    elif args.kind == "preflight-return":
+        print("feedback: 実装前確認をPMへ戻しました。オーナー操作は不要です")
     else:
         print("feedback: 実装を停止しました。次はPMが仕様・指示書を確認します")
     return 0
@@ -692,19 +994,76 @@ def cmd_resume(args: argparse.Namespace) -> int:
             raise FlowError("implementation_pausedからだけ再開できます")
         pause = latest_event(events, "transition")
         classification = pause.get("data", {}).get("classification") if pause else None
-        if classification == "scope-change":
-            raise FlowError("範囲変更はPMがinstruction-readyを通し、実装前確認を再実施して再開してください")
+        pause_data = pause.get("data", {}) if pause else {}
+        resume_state = pause_data.get("resume_state", "implementation")
+        if resume_state not in {"implementation_preflight", "implementation"}:
+            resume_state = "implementation"
+        if classification in {"scope-change", "preflight-return"}:
+            if args.owner_confirmed:
+                append_event(
+                    task_dir,
+                    "owner_command_rejected",
+                    role="owner",
+                    data={"command": "resume", "reason_code": "scope-change-requires-pm"},
+                )
+            raise FlowError("PM差し戻しはPMがinstruction-readyを通し、実装前確認を再実施してください")
+        if classification == "tl-review":
+            if args.owner_confirmed:
+                append_event(
+                    task_dir,
+                    "owner_command_rejected",
+                    role="owner",
+                    data={"command": "resume", "reason_code": "tl-review-requires-pm"},
+                )
+            raise FlowError("Tech Lead判断待ちはPMが指示書を更新してから再開してください")
+        if classification == "tooling-blocker":
+            policy = refresh_policy_scope(task_dir, load_policy(task_dir))
+            expected_digest = pause.get("data", {}).get("candidate_diff_sha256_at_pause")
+            actual_digest = product_diff_digest(task_dir, policy)
+            instruction = task_dir / "instruction.md"
+            expected_instruction = pause.get("data", {}).get("instruction_sha256_at_pause")
+            actual_instruction = sha256_file(instruction) if instruction.is_file() else "missing"
+            errors = validate_implementation_scope(task_dir, policy)
+            if expected_digest != actual_digest or expected_instruction != actual_instruction or errors:
+                details = list(errors)
+                if expected_digest != actual_digest:
+                    details.insert(0, "ツール停止後に候補差分が変わっています")
+                if expected_instruction != actual_instruction:
+                    details.insert(0, "ツール停止後に指示書が変わっています")
+                raise FlowError(
+                    "ツール起因停止を自動再開できません。PMが実際の差分を確認してください:\n- "
+                    + "\n- ".join(details)
+                )
+            append_event(
+                task_dir,
+                "tooling_blocker_resolved",
+                role="implementer",
+                data={"candidate_diff_sha256": actual_digest},
+            )
         if classification == "stop" and not args.owner_confirmed:
             raise FlowError("停止指示からの再開には --owner-confirmed が必要です")
         transition(
             task_dir,
             {"implementation_paused"},
-            "implementation",
+            resume_state,
             role="implementer",
             reason="既存の実装担当セッションを再開",
         )
-    print("resume: PASS (implementation)")
+    print(f"resume: PASS ({resume_state})")
     return 0
+
+
+def cmd_recover_tooling(args: argparse.Namespace) -> int:
+    """Recover a legacy false scope-change without weakening real scope gates.
+
+    Earlier flowctl versions had no tooling-blocker classification.  This is only
+    available when the pause's scope and instruction are still exactly current;
+    otherwise the normal scope-change path remains mandatory.
+    """
+    raise FlowError(
+        "旧scope-changeがツール誤判定だったことを安全に証明できないためrecover-toolingは廃止しました。"
+        "真の範囲変更工程を使うか、既にtooling-blockerとして記録された停止はresumeしてください"
+    )
 
 
 def run_handoff_validator(task_dir: Path, validator: Path | None) -> None:
@@ -722,6 +1081,51 @@ def run_handoff_validator(task_dir: Path, validator: Path | None) -> None:
         raise FlowError(f"引き渡し形式ゲートに不合格です:\n{detail}")
 
 
+def validate_reproducible_verification_evidence(task_dir: Path) -> list[str]:
+    """Require concise, rerunnable evidence for tasks created by this version."""
+    report = task_dir / "report.md"
+    if not report.is_file():
+        return ["report.mdが存在しない"]
+    text = report.read_text(encoding="utf-8")
+    match = re.search(
+        r"^## 再現可能な検証コマンド\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        return ["report.mdに『## 再現可能な検証コマンド』がない"]
+    body = match.group("body")
+    commands = [value.strip() for value in re.findall(r"`([^`\n]+)`", body) if value.strip()]
+    if not commands:
+        return ["再現可能な検証コマンドをバッククォートで1件以上記録してください"]
+    if not re.search(r"(?:結果|result)\s*[:：].*(?:成功|pass|passed|0件失敗|failures?\s*[:：]?\s*0)", body, re.IGNORECASE):
+        return ["各検証コマンドの実行結果を『結果: 成功』等で記録してください"]
+    return []
+
+
+def validate_required_post_evaluator(task_dir: Path, policy: dict[str, Any]) -> list[str]:
+    """Validate declared supplemental evidence, not subagent identity or independence."""
+    if not policy.get("post_evaluator_required"):
+        return []
+    loop_state = task_dir / "loop-state.md"
+    text = loop_state.read_text(encoding="utf-8") if loop_state.is_file() else ""
+    match = re.search(
+        r"^## 内部検証証跡\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        return ["高リスクタスクに必須の実装後内部検証証跡がありません"]
+    body = match.group("body")
+    required = (
+        "実施要否: 必須",
+        "最終判定: 合格",
+        "合格後の実装・テスト・設定・自動生成物変更: なし",
+    )
+    missing = [marker for marker in required if marker not in body]
+    return ["高リスクタスクの実装後内部検証証跡が不足しています: " + "、".join(missing)] if missing else []
+
+
 def cmd_submit(args: argparse.Namespace) -> int:
     task_dir = task_path(args.task_dir)
     with task_lock(task_dir):
@@ -729,6 +1133,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
         if current_state(load_events(task_dir)) != "implementation":
             raise FlowError("implementation工程からだけPM提出できます")
         run_handoff_validator(task_dir, Path(args.validator).resolve() if args.validator else None)
+        post_evaluator_errors = validate_required_post_evaluator(task_dir, policy)
+        if post_evaluator_errors:
+            raise FlowError("内部検証記録の形式確認に不合格です:\n- " + "\n- ".join(post_evaluator_errors))
+        if policy.get("verification_evidence_required"):
+            evidence_errors = validate_reproducible_verification_evidence(task_dir)
+            if evidence_errors:
+                raise FlowError("再現可能な検証証拠が不足しています:\n- " + "\n- ".join(evidence_errors))
         errors = validate_implementation_scope(task_dir, policy)
         if errors:
             raise FlowError("差分境界ゲートに不合格です:\n- " + "\n- ".join(errors))
@@ -914,6 +1325,10 @@ def start_audit(
     policy = load_policy(task_dir)
     if auditor not in required_auditors(policy):
         raise FlowError(f"このタスクで要求されていない監査です: {auditor}")
+    if provider != auditor:
+        raise FlowError(f"{auditor}監査はprovider={auditor}の独立セッションで開始してください")
+    if not session_id or session_id.startswith("manual-"):
+        raise FlowError("独立監査のsession IDをhookで確認できません")
     events = load_events(task_dir)
     state = current_state(events)
     if state not in {"audit_ready", "auditing"}:
@@ -931,6 +1346,13 @@ def start_audit(
     )
     if duplicate_start:
         raise FlowError(f"第{round_number}ラウンドの{auditor}監査は既に開始済みです")
+    if any(
+        event.get("kind") == "audit_started"
+        and event.get("data", {}).get("round") == round_number
+        and event.get("session_id") == session_id
+        for event in events
+    ):
+        raise FlowError("同じ独立セッションで複数監査を開始できません")
     append_event(
         task_dir,
         "audit_started",
@@ -949,14 +1371,6 @@ def start_audit(
             session_id=session_id,
             reason="独立監査開始",
         )
-
-
-def cmd_audit_start(args: argparse.Namespace) -> int:
-    task_dir = task_path(args.task_dir)
-    with task_lock(task_dir):
-        start_audit(task_dir, args.auditor, args.provider, None)
-    print(f"audit start: PASS ({args.auditor})")
-    return 0
 
 
 def infer_audit_result(path: Path) -> str:
@@ -1118,7 +1532,7 @@ def cmd_revoke(args: argparse.Namespace) -> int:
 
 
 def role_token(role: str, provider: str) -> str:
-    base = role.removeprefix("auditor-") if role.startswith("auditor-") else role
+    base = "auditor" if role.startswith("auditor-") else role
     return f"${base}" if provider == "codex" else f"/{base}"
 
 
@@ -1129,12 +1543,25 @@ def existing_files(task_dir: Path, names: Sequence[str]) -> list[str]:
 def prompt_for(role: str, provider: str, task_dir: Path, state: str) -> str:
     events = load_events(task_dir)
     reusable_role = role in {"pm", "implementer"}
-    used_before = any(
-        event.get("kind") == "session_started" and event.get("role") == role
-        for event in events
+    runtime_record = recent_runtime_record(role, task_dir) if reusable_role else None
+    active_runtime = bool(
+        runtime_record
+        and not runtime_record.get("ended_at")
+        and runtime_record.get("provider") == provider
     )
-    token = role_token(role, provider) if not (reusable_role and used_before) else ""
-    names = ["instruction.md", "pre-summary.md", "loop-state.md", "report.md", "summary.md", "implementation-review.md", "audit-request.md", "audit-codex.md", "audit-claude.md", "audit-triage.md"]
+    token = role_token(role, provider) if not active_runtime else ""
+    names_by_role_state = {
+        ("pm", "planning"): ["instruction.md", "scope-baseline.md"],
+        ("pm", "implementation_paused"): ["instruction.md", "pre-summary.md", "loop-state.md"],
+        ("pm", "pm_review"): ["instruction.md", "report.md", "summary.md", "loop-state.md"],
+        ("pm", "post_commit_review"): ["implementation-review.md", "report.md", "summary.md"],
+        ("pm", "audit_triage"): ["audit-request.md", "audit-codex.md", "audit-claude.md", "audit-triage.md"],
+        ("implementer", "instruction_ready"): ["instruction.md", "pre-summary.md", "loop-state.md"],
+        ("implementer", "implementation"): ["instruction.md", "loop-state.md", "report.md", "summary.md"],
+        ("auditor-codex", "audit_ready"): ["audit-request.md", "report.md", "summary.md"],
+        ("auditor-claude", "audit_ready"): ["audit-request.md", "report.md", "summary.md"],
+    }
+    names = names_by_role_state.get((role, state), ["instruction.md", "loop-state.md"])
     files = existing_files(task_dir, names)
     if role == "tl":
         request = latest_event(events, "tl_consultation_requested")
@@ -1152,9 +1579,23 @@ def prompt_for(role: str, provider: str, task_dir: Path, state: str) -> str:
     }[role]
     opening = (
         f"既存の{('PM' if role == 'pm' else '実装担当')}独立セッションへ、以下を貼り付けてください。"
-        if reusable_role and used_before
+        if active_runtime
         else token
     )
+    first_command = (
+        "最初に次を実行してください。既に関連付け済みのためrole-startは再実行しません。\n"
+        + flowctl_command_block("status", [("--task-dir", task_dir)])
+        if active_runtime
+        else "最初に次を実行してください。\n"
+        + flowctl_command_block(
+            "role-start", [("--role", role), ("--task-dir", task_dir)]
+        )
+    )
+    if active_runtime and role == "implementer" and state == "instruction_ready":
+        first_command = (
+            "更新された指示書を同じ実装担当セッションで確認し、軽量preflightへ進むため次を実行してください。\n"
+            + flowctl_command_block("role-start", [("--role", role), ("--task-dir", task_dir)])
+        )
     return "\n".join(
         (
             opening,
@@ -1162,17 +1603,23 @@ def prompt_for(role: str, provider: str, task_dir: Path, state: str) -> str:
             f"対象task: {task_dir}",
             f"flowctl工程: {state}",
             action,
-            "以下の存在するファイルを全文確認してください。",
+            "初回は以下を確認してください。既存セッションでは変更された成果物・節だけを再確認し、hash不変の資料は全文再読不要です。",
             file_lines or "- （現時点で追加成果物なし）",
             "",
-            f"最初に ~/.ai-devteam/bin/flowctl role-start --role {role} --task-dir {task_dir} を実行してください。",
-            "別役割の独立セッションは起動せず、工程完了時はflowctl nextの出力を提示してください。",
+            first_command,
+            "別役割の独立セッションは起動せず、工程完了時はflowctl nextの出力を提示してください。別機能なら、このセッションへ貼らず新しい独立セッションを開始してください。",
         )
     )
 
 
 def cmd_next(args: argparse.Namespace) -> int:
     task_dir = task_path(args.task_dir)
+    if not policy_path(task_dir).is_file():
+        document_task_root(task_dir)
+        print(f"文書運用: {task_dir}")
+        print("tasks.mdの現在地と最新の指示・報告・監査から、担当役割の成果物を作成して引き継いでください。")
+        print("機械的な次工程・合格判定はありません。initやscope-lockをこの案内だけで追加しないでください。")
+        return 0
     policy = load_policy(task_dir)
     events = load_events(task_dir)
     state = current_state(events)
@@ -1184,8 +1631,15 @@ def cmd_next(args: argparse.Namespace) -> int:
         if not request or (decision and decision.get("at", "") > request.get("at", "")):
             outputs.append(
                 "既存のPM独立セッションでTech Lead相談資料を作成し、次を実行してください。\n"
-                f"~/.ai-devteam/bin/flowctl tl-request --task-dir {task_dir} "
-                "--consultation-file <相談資料> --summary <判断論点>\n"
+                + flowctl_command_block(
+                    "tl-request",
+                    [
+                        ("--task-dir", task_dir),
+                        ("--consultation-file", "<相談資料>"),
+                        ("--summary", "<判断論点>"),
+                    ],
+                )
+                + "\n"
                 "登録後にflowctl nextを再実行してください。"
             )
         else:
@@ -1195,17 +1649,39 @@ def cmd_next(args: argparse.Namespace) -> int:
     elif state in {"instruction_ready", "implementation"}:
         outputs.append(prompt_for("implementer", provider, task_dir, state))
     elif state == "implementation_preflight":
-        outputs.append(
-            "pre-summary.mdを確認し、問題なければオーナー自身のターミナルで次を実行してください。\n"
-            f"~/.ai-devteam/bin/flowctl start-approve --task-dir {task_dir} --owner-confirmed\n"
-            "承認後は現在の実装担当セッションへ、そのまま続行するよう伝えてください。"
-        )
+        policy = refresh_policy_scope(task_dir, policy)
+        errors = validate_implementation_scope(task_dir, policy)
+        if errors:
+            outputs.append(
+                "旧実装前工程に範囲外候補があります。オーナー操作は不要です。"
+                "実装担当が不要な候補を撤回し、元の成果に不可欠で固定glob外ならPMへ戻してください。\n- "
+                + "\n- ".join(errors)
+            )
+        else:
+            outputs.append(
+                "同じ実装担当セッションでpre-summary.mdへ既存パターン・予定差分・検証方法・未解決事項を記録し、次を実行してください。別Evaluatorとオーナー開始承認は不要です。\n"
+                + flowctl_command_block("preflight-complete", [("--task-dir", task_dir)])
+            )
     elif state == "implementation_paused":
         pause = latest_event(events, "transition")
-        if pause and pause.get("data", {}).get("classification") in {"scope-change", "tl-review"}:
+        classification = pause.get("data", {}).get("classification") if pause else None
+        if classification in {"scope-change", "tl-review", "preflight-return"}:
             outputs.append(prompt_for("pm", provider, task_dir, state))
+        elif classification == "tooling-blocker":
+            outputs.append(
+                "ツール起因の停止です。スコープ固定・指示書・オーナー承認を繰り返しません。\n"
+                "ツール側の問題が解消した後、同じ実装担当独立セッションで候補差分を変更せずに次を実行してください。\n"
+                + flowctl_command_block("resume", [("--task-dir", task_dir)])
+                + "\n"
+                "再開時に固定スコープと候補差分digestを再検証します。"
+            )
         else:
-            outputs.append("オーナーが停止理由を確認し、再開する場合だけ flowctl resume --owner-confirmed を実行してください。")
+            outputs.append(
+                "オーナーが停止理由を確認し、再開する場合だけ次を実行してください。\n"
+                + flowctl_command_block(
+                    "resume", [("--task-dir", task_dir), ("--owner-confirmed", None)]
+                )
+            )
     elif state == "awaiting_commit":
         outputs.append("あなた（オーナー）がimplementation-review.mdを確認してコミットし、同じPMセッションへ確定SHAを伝えてください。")
     elif state in {"audit_ready", "auditing"}:
@@ -1222,7 +1698,12 @@ def cmd_next(args: argparse.Namespace) -> int:
         if not outputs:
             outputs.append("開始済みの独立監査結果を待ってください。監査セッションを重複起動しません。")
     elif state == "owner_close":
-        outputs.append("あなた（オーナー）が監査整理を確認し、問題なければ flowctl close --owner-confirmed を実行してください。")
+        outputs.append(
+            "あなた（オーナー）が監査整理を確認し、問題なければ次を実行してください。\n"
+            + flowctl_command_block(
+                "close", [("--task-dir", task_dir), ("--owner-confirmed", None)]
+            )
+        )
     elif state == "closed":
         outputs.append("このタスクはオーナーによりクローズ済みです。")
     else:
@@ -1232,13 +1713,38 @@ def cmd_next(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    if not args.task_dir:
+        directory = Path(args.project_root or os.getcwd()).expanduser().resolve()
+        features = discover_flow_documents(directory)
+        if args.json:
+            print(json.dumps({"features": features, "current_task_inferred": False}, ensure_ascii=False, indent=2))
+        else:
+            print("文書の所在（現在task・完了状態は推測していません）:")
+            for feature in features:
+                print(feature["feature_dir"])
+                for entrypoint in feature["entrypoints"]:
+                    print(f"  入口: {entrypoint}")
+                for task in feature["tasks"]:
+                    print(f"  task: {task['task_dir']} ({task['workflow']}, 記録={task['recorded_state'] or 'なし'})")
+            if not features:
+                print("docs/flowの資料は見つかりません。依頼の対象パスを確認してください。初期化は要求しません。")
+        return 0
     task_dir = task_path(args.task_dir)
-    with task_lock(task_dir):
-        refresh_derived_files(task_dir)
+    if not task_dir.is_dir():
+        raise FlowError(f"対象taskが存在しません: {task_dir}")
+    if not policy_path(task_dir).is_file():
+        result = {"workflow": "documents", "state": None, "task_dir": str(task_dir), "metrics": None}
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print("workflow: documents（機械工程の記録なし。実装の進捗は文書で確認します）")
+            print("未初期化は実装不備ではありません。既存資料をそのまま利用でき、init/adoptは不要です")
+        return 0
     policy = load_policy(task_dir)
     events = load_events(task_dir)
     metrics = calculate_metrics(task_dir)
     result = {
+        "workflow": "managed",
         "state": current_state(events),
         "risk": policy.get("risk_level"),
         "audits": required_auditors(policy),
@@ -1254,6 +1760,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"sessions: {metrics['session_count']}")
         print(f"PM returns: {metrics['pm_returns']}/{metrics['implementation_submissions']}")
         print(f"first audit pass: {metrics['first_audit_pass']}")
+        print("記録上の状態です。実際の完了・品質は成果物と差分で確認してください")
     return 0
 
 
@@ -1273,7 +1780,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
     errors: list[str] = []
     instruction_errors, _ = parse_instruction(task_dir, policy)
     errors.extend(instruction_errors)
-    if current_state(load_events(task_dir)) in {"implementation", "pm_review"}:
+    state = current_state(load_events(task_dir))
+    if state in {
+        "instruction_ready",
+        "implementation_preflight",
+        "implementation",
+        "implementation_paused",
+        "pm_review",
+    }:
         errors.extend(validate_implementation_scope(task_dir, policy))
     if errors:
         raise FlowError("validate: FAIL\n- " + "\n- ".join(errors))
@@ -1372,6 +1886,15 @@ def build_parser() -> argparse.ArgumentParser:
     scope_lock.add_argument("--owner-confirmed", action="store_true")
     scope_lock.set_defaults(func=cmd_scope_lock)
 
+    scope_check = sub.add_parser(
+        "scope-check",
+        help="PMがオーナー操作前にスコープ固定内容を読み取り検証する",
+    )
+    scope_check.add_argument("--scope-file", required=True)
+    scope_check.add_argument("--audits", type=int, choices=(1, 2), default=2)
+    scope_check.add_argument("--single-auditor", choices=sorted(AUDITORS))
+    scope_check.set_defaults(func=cmd_scope_check)
+
     scope_unlock = sub.add_parser("scope-unlock", help="オーナーがスコープ再検討のため固定を解除する")
     scope_unlock.add_argument("--scope-file", required=True)
     scope_unlock.add_argument("--reason", required=True)
@@ -1389,7 +1912,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--base", required=True)
     init.add_argument("--tl", choices=("required", "not-required"), required=True)
     init.add_argument("--tl-reason")
-    init.add_argument("--pre-evaluator", choices=("required", "not-required"), required=True)
+    init.add_argument("--pre-evaluator", choices=("required", "not-required"), default="not-required", help="旧工程互換。新規taskでは使用しない")
     init.add_argument("--pre-summary", choices=("required", "not-required"), default="required")
     init.add_argument("--formal-doc", action="append")
     init.add_argument("--generated-doc", action="append")
@@ -1403,7 +1926,7 @@ def build_parser() -> argparse.ArgumentParser:
     adopt.add_argument("--branch", required=True)
     adopt.add_argument("--base", required=True)
     adopt.add_argument("--state", choices=("planning", "instruction_ready", "implementation_preflight", "implementation", "pm_review"), required=True)
-    adopt.add_argument("--pre-evaluator", choices=("required", "not-required"), required=True)
+    adopt.add_argument("--pre-evaluator", choices=("required", "not-required"), default="not-required", help="旧工程互換。取込み後の開始ゲートには使用しない")
     adopt.add_argument("--pre-summary", choices=("required", "not-required"), default="required")
     adopt.add_argument("--formal-doc", action="append")
     adopt.add_argument("--generated-doc", action="append")
@@ -1434,16 +1957,20 @@ def build_parser() -> argparse.ArgumentParser:
     role.add_argument("--provider", choices=("codex", "claude"))
     role.set_defaults(func=cmd_role_start)
 
-    start = sub.add_parser("start-approve", help="オーナーが実装前サマリを承認する")
+    preflight = sub.add_parser("preflight-complete", help="実装担当が実装前確認の合格を記録して実装へ進む")
+    preflight.add_argument("--task-dir", required=True)
+    preflight.set_defaults(func=cmd_preflight_complete)
+
+    start = sub.add_parser("start-approve", help="旧工程互換: オーナーが実装前確認を承認する")
     start.add_argument("--task-dir", required=True)
     start.add_argument("--owner-confirmed", action="store_true")
     start.set_defaults(func=cmd_start_approve)
 
-    feedback = sub.add_parser("feedback", help="実装中の質問・指摘を分類して記録する")
+    feedback = sub.add_parser("feedback", help="実装前・実装中の質問・指摘を分類して記録する")
     feedback.add_argument("--task-dir", required=True)
     feedback.add_argument(
         "--kind",
-        choices=("question", "correction", "tl-review", "scope-change", "stop"),
+        choices=("question", "correction", "tl-review", "scope-change", "preflight-return", "tooling-blocker", "stop"),
         required=True,
     )
     feedback.add_argument("--summary", required=True)
@@ -1453,6 +1980,14 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--task-dir", required=True)
     resume.add_argument("--owner-confirmed", action="store_true")
     resume.set_defaults(func=cmd_resume)
+
+    recover_tooling = sub.add_parser(
+        "recover-tooling",
+        help="PMが旧版で誤分類されたツール起因停止を安全に復旧する",
+    )
+    recover_tooling.add_argument("--task-dir", required=True)
+    recover_tooling.add_argument("--summary", required=True)
+    recover_tooling.set_defaults(func=cmd_recover_tooling)
 
     submit = sub.add_parser("submit", help="引き渡し・差分境界を検証してPMレビューへ進める")
     submit.add_argument("--task-dir", required=True)
@@ -1475,12 +2010,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit_ready = sub.add_parser("audit-ready", help="PMのaudit-requestを検証する")
     audit_ready.add_argument("--task-dir", required=True)
     audit_ready.set_defaults(func=cmd_audit_ready)
-
-    audit_start = sub.add_parser("audit-start", help="要求された独立監査を開始記録する")
-    audit_start.add_argument("--task-dir", required=True)
-    audit_start.add_argument("--auditor", choices=sorted(AUDITORS), required=True)
-    audit_start.add_argument("--provider", choices=("codex", "claude"))
-    audit_start.set_defaults(func=cmd_audit_start)
 
     audit_result = sub.add_parser("audit-result", help="監査ファイルの判定を登録する")
     audit_result.add_argument("--task-dir", required=True)
@@ -1521,8 +2050,10 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument("--provider", choices=("codex", "claude"), required=True)
     next_parser.set_defaults(func=cmd_next)
 
-    status = sub.add_parser("status", help="現在工程を表示する")
-    status.add_argument("--task-dir", required=True)
+    status = sub.add_parser("status", help="記録された工程、またはプロジェクト内の文書の所在を読み取り表示する")
+    status_target = status.add_mutually_exclusive_group()
+    status_target.add_argument("--task-dir")
+    status_target.add_argument("--project-root")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=cmd_status)
 

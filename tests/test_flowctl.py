@@ -28,6 +28,11 @@ VALID_SCOPE = """# 承認済みスコープ基準
 | --- | --- | --- | --- | --- | --- |
 | 要求1 | 利用者がプロフィール名を安全に更新できる | `src/**`<br>`tests/**` | 入力検証 | 標準 | 10ファイル / 500行 |
 
+## オーナー承認サマリ
+
+- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。
+- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。
+
 ## 明示的な対象外
 
 - 通知、課金、認証方式、DB schemaは変更しない。
@@ -43,9 +48,6 @@ VALID_INSTRUCTION = """# 実装指示書
 - 不可逆境界数: 0
 - 不可逆境界: なし
 - リスク領域: 入力検証
-- 実装前内部検証: 不要
-- 実装前内部検証の理由: 既存方式内の局所変更
-
 ## 実装担当の変更許可パス
 
 - `src/**`
@@ -66,6 +68,15 @@ VALID_SUMMARY = """[TITLE] プロフィール名更新
 [ERRORS] 不正入力を拒否
 [ASSUMPTIONS] なし
 [DEVIATION] なし
+"""
+
+
+VALID_PRE_SUMMARY = """# 実装前サマリ
+
+- 既存パターン: src/profile.pyと隣接テストの構成を維持する
+- 予定差分: プロフィール名更新と直接テストだけ
+- 検証方法: profile testを実行する
+- 未解決事項: なし
 """
 
 
@@ -104,6 +115,10 @@ VALID_REPORT = """# 実装報告
 | 受け入れ条件 | 実装箇所 | 検証証拠 | 結果 |
 | --- | --- | --- | --- |
 | 条件1（正常な名前更新） | src/profile.py | tests/test_profile.py | 成功 |
+
+## 再現可能な検証コマンド
+
+- `python3 -m pytest tests/test_profile.py` 結果: 成功
 """
 
 
@@ -206,6 +221,22 @@ class FlowctlTest(unittest.TestCase):
         (self.fixture.task / "loop-state.md").write_text(VALID_LOOP, encoding="utf-8")
         (self.fixture.task / "report.md").write_text(VALID_REPORT, encoding="utf-8")
 
+    def begin_implementation(self) -> None:
+        self.lock_and_init()
+        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
+        self.assertEqual(
+            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        self.complete_lightweight_preflight()
+
+    def complete_lightweight_preflight(self) -> None:
+        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
+        code, _, error = self.invoke(
+            "preflight-complete", "--task-dir", str(self.fixture.task)
+        )
+        self.assertEqual(code, 0, error)
+
     def test_one_audit_must_be_fixed_by_owner_scope_lock(self) -> None:
         code, _, error = self.invoke(
             "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
@@ -237,6 +268,53 @@ class FlowctlTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("scope-lock時に固定", error)
 
+    def test_scope_check_prints_a_copyable_multiline_lock_command(self) -> None:
+        code, output, error = self.invoke(
+            "scope-check",
+            "--scope-file",
+            str(self.fixture.scope),
+            "--audits",
+            "2",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("```sh", output)
+        self.assertIn("~/.ai-devteam/bin/flowctl scope-lock \\", output)
+        self.assertIn(f"  --scope-file {self.fixture.scope.resolve()} \\", output)
+        self.assertIn("  --audits 2 \\", output)
+        self.assertIn("  --owner-confirmed", output)
+
+    def test_init_creates_a_missing_task_directory(self) -> None:
+        (self.fixture.task / "instruction.md").unlink()
+        self.fixture.task.rmdir()
+        self.assertEqual(
+            self.invoke(
+                "scope-lock",
+                "--scope-file",
+                str(self.fixture.scope),
+                "--owner-confirmed",
+            )[0],
+            0,
+        )
+        code, _, error = self.invoke(
+            "init",
+            "--task-dir",
+            str(self.fixture.task),
+            "--scope-file",
+            str(self.fixture.scope),
+            "--scope-id",
+            "要求1",
+            "--risk",
+            "standard",
+            "--branch",
+            "feature/profile",
+            "--base",
+            self.base,
+            "--tl",
+            "not-required",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertTrue(lib.policy_path(self.fixture.task).is_file())
+
     def test_temporary_capability_is_bound_to_role(self) -> None:
         self.lock_and_init()
         self.assertEqual(
@@ -265,6 +343,83 @@ class FlowctlTest(unittest.TestCase):
         self.fixture.scope.write_text(VALID_SCOPE.replace("入力検証", "入力検証、Slack通知"), encoding="utf-8")
         with self.assertRaises(lib.FlowError):
             lib.validate_scope_lock(self.fixture.scope)
+
+    def test_scope_lock_requires_owner_facing_explanation(self) -> None:
+        self.fixture.scope.write_text(
+            VALID_SCOPE.replace(
+                "## オーナー承認サマリ\n\n"
+                "- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。\n"
+                "- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。\n\n",
+                "",
+            ),
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke(
+            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("オーナー承認サマリ", error)
+
+    def test_scope_lock_prints_owner_receipt(self) -> None:
+        code, output, error = self.invoke(
+            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("オーナー承認記録", output)
+        self.assertIn("範囲・上限の理由", output)
+        self.assertIn("この操作だけでは許可しないこと", output)
+
+    def test_scope_check_validates_before_owner_is_asked_to_lock(self) -> None:
+        self.fixture.scope.write_text(
+            VALID_SCOPE.replace(
+                "## オーナー承認サマリ\n\n"
+                "- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。\n"
+                "- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。\n\n",
+                "",
+            ),
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
+        self.assertEqual(code, 1)
+        self.assertIn("オーナー承認サマリ", error)
+
+        self.fixture.scope.write_text(VALID_SCOPE, encoding="utf-8")
+        code, output, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
+        self.assertEqual(code, 0, error)
+        self.assertIn("scope check: PASS", output)
+        self.assertIn("オーナー承認記録", output)
+        self.assertEqual(
+            self.invoke("scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed")[0],
+            0,
+        )
+        code, output, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
+        self.assertEqual(code, 0, error)
+        self.assertIn("オーナー操作は不要", output)
+
+    def test_legacy_scope_lock_remains_idempotent(self) -> None:
+        requirements, errors = lib.parse_scope_baseline(self.fixture.scope)
+        self.assertEqual(errors, [])
+        lock_path = lib.scope_lock_path(self.fixture.scope)
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active": True,
+                    "scope_file": "docs/flow/profile/scope-baseline.md",
+                    "sha256": lib.sha256_file(self.fixture.scope),
+                    "requirements": requirements,
+                    "audit_count": 2,
+                    "single_auditor": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        code, output, error = self.invoke(
+            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("legacy active", output)
 
     def test_scope_lock_cannot_change_audit_policy_without_unlock(self) -> None:
         self.assertEqual(
@@ -380,6 +535,59 @@ class FlowctlTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("承認済み外部成果と同一文", error)
 
+    def test_instruction_ready_preflights_candidate_diff_before_owner_gate(self) -> None:
+        self.lock_and_init()
+        unexpected = self.fixture.root / "unexpected"
+        unexpected.mkdir()
+        (unexpected / "outside.py").write_text("VALUE = 1\n", encoding="utf-8")
+        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 1)
+        self.assertIn("候補差分の事前検証", error)
+        self.assertIn("変更許可パス外", error)
+        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "planning")
+
+    def test_sensitive_named_source_is_allowed_but_secret_value_is_not_exposed(self) -> None:
+        source = self.fixture.root / "src" / "workspace-db-credential.service.ts"
+        source.write_text("export const credentialName = 'managed';\n", encoding="utf-8")
+        self.assertFalse(lib.is_secret_path("src/workspace-db-credential.service.ts"))
+        self.assertTrue(lib.is_sensitive_source_path("src/workspace-db-credential.service.ts"))
+        self.lock_and_init()
+        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 0, error)
+
+        fake_secret = "sk-" + "abcdefghijklmnopqrst"
+        source.write_text(f"export const credential = '{fake_secret}';\n", encoding="utf-8")
+        self.assertTrue(lib.contains_high_confidence_source_secret(source))
+        errors = lib.validate_implementation_scope(self.fixture.task, lib.load_policy(self.fixture.task))
+        self.assertIn("値は表示しません", "\n".join(errors))
+        self.assertNotIn(fake_secret, "\n".join(errors))
+
+    def test_high_confidence_secret_shapes_are_detected_without_returning_values(self) -> None:
+        samples = (
+            "xoxb-123456789012-abcdefghijklmnopqrstuv",
+            "eyJabcdefghijkl.abcdefghijklmnop.abcdefghijklmnop",
+            "postgresql://service-user:private-password@db.example.invalid/app",
+        )
+        source = self.fixture.root / "src" / "settings.ts"
+        for value in samples:
+            source.write_text(f"export const value = '{value}';\n", encoding="utf-8")
+            self.assertTrue(lib.contains_high_confidence_source_secret(source))
+
+    def test_legacy_manual_session_start_is_reported_but_not_counted_as_active(self) -> None:
+        self.lock_and_init()
+        lib.append_event(
+            self.fixture.task,
+            "session_started",
+            role="pm",
+            session_id="manual-legacy",
+            data={"measurement": "manual-start-only", "span_id": "legacy-span"},
+        )
+        metrics = lib.calculate_metrics(self.fixture.task)
+        self.assertEqual(metrics["session_count"], 0)
+        self.assertEqual(metrics["active_seconds"], 0)
+        self.assertEqual(metrics["unmeasured_session_starts"], 1)
+        self.assertIn("概算", metrics["timing_quality"])
+
     def test_submit_rejects_owner_locked_change_budget_overrun(self) -> None:
         self.fixture.scope.write_text(
             VALID_SCOPE.replace("10ファイル / 500行", "1ファイル / 1行"),
@@ -391,11 +599,7 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.make_handoff()
         (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\nMORE = True\n", encoding="utf-8")
         code, _, error = self.invoke("submit", "--task-dir", str(self.fixture.task))
@@ -413,13 +617,7 @@ class FlowctlTest(unittest.TestCase):
             )[0],
             0,
         )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed"
-            )[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.assertEqual(
             self.invoke(
                 "feedback",
@@ -450,6 +648,287 @@ class FlowctlTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("PMがinstruction-ready", error)
 
+    def test_tooling_blocker_resumes_without_scope_or_owner_reapproval(self) -> None:
+        self.begin_implementation()
+        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "tooling-blocker",
+                "--summary",
+                "候補差分は固定範囲内だがツール検査が停止した",
+            )[0],
+            0,
+        )
+        code, output, error = self.invoke(
+            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("スコープ固定・指示書・オーナー承認を繰り返しません", output)
+        self.assertEqual(self.invoke("resume", "--task-dir", str(self.fixture.task))[0], 0)
+        metrics = lib.calculate_metrics(self.fixture.task)
+        self.assertEqual(metrics["tooling_blockers"], 1)
+        self.assertEqual(metrics["tooling_recoveries"], 1)
+        self.assertEqual(metrics["owner_start_approvals"], 0)
+
+    def test_tooling_blocker_does_not_resume_after_candidate_diff_changes(self) -> None:
+        self.begin_implementation()
+        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "tooling-blocker",
+                "--summary",
+                "ツール検査の互換性問題",
+            )[0],
+            0,
+        )
+        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'changed again'\n", encoding="utf-8")
+        code, _, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 1)
+        self.assertIn("候補差分が変わっています", error)
+
+    def test_tooling_blocker_does_not_resume_after_instruction_changes(self) -> None:
+        self.begin_implementation()
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "tooling-blocker",
+                "--summary",
+                "ツール検査の互換性問題",
+            )[0],
+            0,
+        )
+        instruction = self.fixture.task / "instruction.md"
+        instruction.write_text(
+            instruction.read_text(encoding="utf-8") + "\n- 追記: 指示書変更\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 1)
+        self.assertIn("指示書が変わっています", error)
+
+    def test_pm_can_recover_legacy_tooling_false_scope_change_without_owner_commands(self) -> None:
+        self.begin_implementation()
+        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "scope-change",
+                "--summary",
+                "旧版の検査器が固定済みソース名を誤分類した",
+            )[0],
+            0,
+        )
+        code, output, error = self.invoke(
+            "recover-tooling",
+            "--task-dir",
+            str(self.fixture.task),
+            "--summary",
+            "検査器の誤分類を修正済み。範囲と指示書は不変",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("recover-toolingは廃止", error)
+
+    def test_legacy_tooling_recovery_rejects_changed_instruction(self) -> None:
+        self.begin_implementation()
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "scope-change",
+                "--summary",
+                "旧版の検査器が誤って範囲変更として登録した",
+            )[0],
+            0,
+        )
+        instruction = self.fixture.task / "instruction.md"
+        instruction.write_text(
+            instruction.read_text(encoding="utf-8") + "\n- 追記: 実際の指示書変更\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke(
+            "recover-tooling",
+            "--task-dir",
+            str(self.fixture.task),
+            "--summary",
+            "検査器を修正済み",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("recover-toolingは廃止", error)
+
+    def test_legacy_tooling_recovery_rejects_changed_candidate_diff(self) -> None:
+        self.begin_implementation()
+        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "scope-change",
+                "--summary",
+                "旧版の検査器が誤って範囲変更として登録した",
+            )[0],
+            0,
+        )
+        (self.fixture.root / "src" / "profile.py").write_text(
+            "NAME = 'changed again'\n", encoding="utf-8"
+        )
+        code, _, error = self.invoke(
+            "recover-tooling",
+            "--task-dir",
+            str(self.fixture.task),
+            "--summary",
+            "検査器を修正済み",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("recover-toolingは廃止", error)
+
+    def test_validate_rechecks_candidate_diff_without_owner_command(self) -> None:
+        self.lock_and_init()
+        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
+        self.assertEqual(
+            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
+        unexpected = self.fixture.root / "unexpected"
+        unexpected.mkdir()
+        (unexpected / "outside.py").write_text("VALUE = 1\n", encoding="utf-8")
+        code, _, error = self.invoke("validate", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 1)
+        self.assertIn("変更許可パス外", error)
+        self.assertEqual(lib.calculate_metrics(self.fixture.task)["owner_command_rejections"], 0)
+
+    def test_lightweight_preflight_requires_summary_but_not_owner_approval(self) -> None:
+        self.lock_and_init()
+        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
+        self.assertEqual(
+            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        self.assertEqual(
+            lib.current_state(lib.load_events(self.fixture.task)), "implementation_preflight"
+        )
+        code, _, error = self.invoke(
+            "preflight-complete", "--task-dir", str(self.fixture.task)
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("pre-summary.md", error)
+        (self.fixture.task / "pre-summary.md").write_text(
+            "# 実装前サマリ\n\n- 既存パターン:\n- 予定差分:\n- 検証方法:\n- 未解決事項: なし\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke(
+            "preflight-complete", "--task-dir", str(self.fixture.task)
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("空または未確認", error)
+        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
+        profile = self.fixture.root / "src" / "profile.py"
+        profile.write_text("NAME = 'changed-before-preflight'\n", encoding="utf-8")
+        code, _, error = self.invoke(
+            "preflight-complete", "--task-dir", str(self.fixture.task)
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("instruction-ready後", error)
+        profile.write_text("NAME = 'before'\n", encoding="utf-8")
+        self.assertEqual(
+            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation")
+        code, output, error = self.invoke(
+            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertNotIn("start-approve", output)
+        self.assertNotIn("preflight-return", output)
+        self.assertIn("~/.ai-devteam/bin/flowctl role-start \\", output)
+        self.assertIn("  --role implementer \\", output)
+
+    def test_legacy_negative_preflight_cannot_be_bypassed(self) -> None:
+        self.lock_and_init()
+        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
+        self.assertEqual(
+            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        policy = lib.load_policy(self.fixture.task)
+        policy.pop("instruction_ready_candidate_diff_sha256", None)
+        lib.save_policy(self.fixture.task, policy)
+        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
+        (self.fixture.task / "loop-state.md").write_text(
+            "# 旧記録\n\n## 実装前検証証跡\n\n- 最終判定: PM差し戻し\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.invoke(
+            "start-approve",
+            "--task-dir",
+            str(self.fixture.task),
+            "--owner-confirmed",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("start-approveは廃止", error)
+        code, output, error = self.invoke(
+            "preflight-complete", "--task-dir", str(self.fixture.task)
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("PMへ自動で戻しました", output)
+        self.assertEqual(
+            lib.current_state(lib.load_events(self.fixture.task)), "implementation_paused"
+        )
+
+    def test_tooling_blocker_in_preflight_resumes_to_preflight(self) -> None:
+        self.lock_and_init()
+        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
+        self.assertEqual(
+            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+        self.assertEqual(
+            self.invoke(
+                "feedback",
+                "--task-dir",
+                str(self.fixture.task),
+                "--kind",
+                "tooling-blocker",
+                "--summary",
+                "検査器の誤判定",
+            )[0],
+            0,
+        )
+        code, output, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 0, error)
+        self.assertIn("implementation_preflight", output)
+        self.assertEqual(
+            lib.current_state(lib.load_events(self.fixture.task)), "implementation_preflight"
+        )
+        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
+        self.assertEqual(
+            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
+            0,
+        )
+
+    def test_standard_risk_does_not_require_post_evaluator(self) -> None:
+        self.lock_and_init()
+        self.assertFalse(lib.load_policy(self.fixture.task)["post_evaluator_required"])
+
     def test_scope_change_reapproval_returns_through_preflight(self) -> None:
         self.lock_and_init()
         self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
@@ -458,11 +937,7 @@ class FlowctlTest(unittest.TestCase):
             0,
         )
         pre_summary = self.fixture.task / "pre-summary.md"
-        pre_summary.write_text("# 実装前サマリ\n\n初回\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.assertEqual(
             self.invoke(
                 "feedback",
@@ -475,9 +950,7 @@ class FlowctlTest(unittest.TestCase):
             )[0],
             0,
         )
-        updated_instruction = VALID_INSTRUCTION.replace(
-            "既存方式内の局所変更", "再承認された検証範囲内の局所変更"
-        )
+        updated_instruction = VALID_INSTRUCTION + "\n再承認された検証範囲内の局所変更。\n"
         (self.fixture.task / "instruction.md").write_text(updated_instruction, encoding="utf-8")
         code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
         self.assertEqual(code, 1)
@@ -514,14 +987,9 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        code, _, error = self.invoke(
-            "start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed"
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("pre-summary.mdを更新", error)
-        pre_summary.write_text("# 実装前サマリ\n\n再承認範囲を確認済み\n", encoding="utf-8")
+        pre_summary.write_text(VALID_PRE_SUMMARY, encoding="utf-8")
         self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
+            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
             0,
         )
         self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation")
@@ -534,11 +1002,7 @@ class FlowctlTest(unittest.TestCase):
             0,
         )
         pre_summary = self.fixture.task / "pre-summary.md"
-        pre_summary.write_text("# 実装前サマリ\n\n初回\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.assertEqual(
             self.invoke(
                 "feedback",
@@ -581,7 +1045,7 @@ class FlowctlTest(unittest.TestCase):
         )
         self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation_paused")
         (self.fixture.task / "instruction.md").write_text(
-            VALID_INSTRUCTION.replace("既存方式内の局所変更", "Tech Lead判断済みの既存境界を維持"),
+            VALID_INSTRUCTION + "\nTech Lead判断済みの既存境界を維持する。\n",
             encoding="utf-8",
         )
         self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
@@ -589,9 +1053,9 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        pre_summary.write_text("# 実装前サマリ\n\nTech Lead判断を反映済み\n", encoding="utf-8")
+        pre_summary.write_text(VALID_PRE_SUMMARY, encoding="utf-8")
         self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
+            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
             0,
         )
 
@@ -686,11 +1150,7 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.make_handoff()
         target = self.fixture.root / "src" / "profile.py"
         target.write_text("NAME = 'accepted'\n", encoding="utf-8")
@@ -717,11 +1177,7 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.make_handoff()
         (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
         self.assertEqual(self.invoke("submit", "--task-dir", str(self.fixture.task))[0], 0)
@@ -740,13 +1196,7 @@ class FlowctlTest(unittest.TestCase):
             self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
             0,
         )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "start-approve", "--task-dir", str(self.fixture.task), "--owner-confirmed"
-            )[0],
-            0,
-        )
+        self.complete_lightweight_preflight()
         self.make_handoff()
         (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
         code, _, error = self.invoke("submit", "--task-dir", str(self.fixture.task))
@@ -781,11 +1231,32 @@ class FlowctlTest(unittest.TestCase):
         )
         self.assertEqual(self.invoke("audit-ready", "--task-dir", str(self.fixture.task))[0], 0)
 
-        for auditor in ("codex", "claude"):
-            code, _, error = self.invoke(
-                "audit-start", "--task-dir", str(self.fixture.task), "--auditor", auditor
+        with self.assertRaisesRegex(flowctl.FlowError, "provider=codex"):
+            flowctl.start_audit(
+                self.fixture.task,
+                "codex",
+                provider="claude",
+                session_id="codex-independent-session",
             )
-            self.assertEqual(code, 0, error)
+        with self.assertRaisesRegex(flowctl.FlowError, "session ID"):
+            flowctl.start_audit(self.fixture.task, "codex", provider="codex", session_id=None)
+
+        for auditor in ("codex", "claude"):
+            if auditor == "claude":
+                with self.assertRaisesRegex(flowctl.FlowError, "同じ独立セッション"):
+                    flowctl.start_audit(
+                        self.fixture.task,
+                        "claude",
+                        provider="claude",
+                        session_id="codex-independent-session",
+                    )
+            with lib.task_lock(self.fixture.task):
+                flowctl.start_audit(
+                    self.fixture.task,
+                    auditor,
+                    provider=auditor,
+                    session_id=f"{auditor}-independent-session",
+                )
             result_file = self.fixture.task / f"audit-{auditor}.md"
             result_file.write_text("# 監査\n\n監査結果: クローズ可\n", encoding="utf-8")
             if auditor == "codex":
@@ -839,6 +1310,13 @@ class FlowctlTest(unittest.TestCase):
             )[0],
             0,
         )
+        code, output, error = self.invoke(
+            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("~/.ai-devteam/bin/flowctl close \\", output)
+        self.assertIn(f"  --task-dir {self.fixture.task.resolve()} \\", output)
+        self.assertIn("  --owner-confirmed", output)
         self.assertEqual(
             self.invoke("close", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
             0,
@@ -846,7 +1324,9 @@ class FlowctlTest(unittest.TestCase):
         metrics = lib.calculate_metrics(self.fixture.task)
         self.assertTrue(metrics["first_audit_pass"])
         self.assertEqual(metrics["pm_returns"], 0)
-        self.assertGreaterEqual(metrics["session_count"], 1)
+        self.assertEqual(metrics["session_count"], 0)
+        self.assertGreaterEqual(metrics["unmeasured_session_starts"], 1)
+        self.assertIn("概算", metrics["timing_quality"])
 
 
 class GuardTest(unittest.TestCase):
@@ -930,10 +1410,7 @@ class GuardTest(unittest.TestCase):
         lib.task_meta_dir(fixture.task).mkdir(parents=True)
         lib.save_policy(fixture.task, policy)
         lib.append_event(fixture.task, "transition", role="pm", data={"from": None, "to": "implementation_preflight"})
-        self.assertIn(
-            "承認前",
-            lib.check_role_write_state("implementer", fixture.task, "src/profile.py") or "",
-        )
+        self.assertIsNotNone(lib.check_role_write_state("implementer", fixture.task, "src/profile.py"))
         self.assertIsNone(
             lib.check_role_write_state(
                 "implementer", fixture.task, "docs/flow/profile/task-01/pre-summary.md"
@@ -941,7 +1418,15 @@ class GuardTest(unittest.TestCase):
         )
         self.assertEqual(lib.parse_flowctl_command("~/.ai-devteam/bin/flowctl pm-review --task-dir x"), "pm-review")
         self.assertNotIn("pm-review", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
+        self.assertIn("preflight-complete", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
+        self.assertNotIn("recover-tooling", lib.ROLE_FLOWCTL_COMMANDS["pm"])
+        self.assertNotIn("recover-tooling", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
+        self.assertNotIn("audit-start", lib.ROLE_FLOWCTL_COMMANDS["auditor-codex"])
         fixture.close()
+
+    def test_auditor_tokens_use_the_role_skill(self) -> None:
+        self.assertEqual(flowctl.role_token("auditor-codex", "codex"), "$auditor")
+        self.assertEqual(flowctl.role_token("auditor-claude", "claude"), "/auditor")
 
     def test_command_guardrails(self) -> None:
         self.assertIsNone(lib.check_bash_command("git commit -m normal", None, set()))
@@ -974,7 +1459,7 @@ class GuardTest(unittest.TestCase):
             lib.check_bash_command("python3 -B -c 'print(1)'", "implementer", set()) or "",
         )
 
-    def test_dependency_and_migration_writes_need_temporary_capability(self) -> None:
+    def test_dependency_writes_need_capability_but_migration_source_does_not(self) -> None:
         self.assertIn(
             "dependency-install",
             lib.check_capability_write("implementer", "package.json", set()) or "",
@@ -982,18 +1467,11 @@ class GuardTest(unittest.TestCase):
         self.assertIsNone(
             lib.check_capability_write("implementer", "package.json", {"dependency-install"})
         )
-        self.assertIn(
-            "migration",
-            lib.check_capability_write(
-                "implementer", "prisma/migrations/001_init/migration.sql", set()
-            )
-            or "",
-        )
         self.assertIsNone(
             lib.check_capability_write(
                 "implementer",
                 "prisma/migrations/001_init/migration.sql",
-                {"migration"},
+                set(),
             )
         )
 

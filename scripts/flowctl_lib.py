@@ -33,6 +33,7 @@ FINAL_STATES = {"closed"}
 ROLE_FLOWCTL_COMMANDS = {
     "pm": {
         "init",
+        "scope-check",
         "tl-request",
         "instruction-ready",
         "pm-review",
@@ -46,9 +47,19 @@ ROLE_FLOWCTL_COMMANDS = {
         "diagnose",
     },
     "tl": {"tl-complete", "next", "status", "metrics", "validate", "diagnose"},
-    "implementer": {"feedback", "resume", "submit", "next", "status", "metrics", "validate", "diagnose"},
-    "auditor-codex": {"audit-start", "audit-result", "next", "status", "metrics", "validate", "diagnose"},
-    "auditor-claude": {"audit-start", "audit-result", "next", "status", "metrics", "validate", "diagnose"},
+    "implementer": {
+        "feedback",
+        "preflight-complete",
+        "resume",
+        "submit",
+        "next",
+        "status",
+        "metrics",
+        "validate",
+        "diagnose",
+    },
+    "auditor-codex": {"audit-result", "next", "status", "metrics", "validate", "diagnose"},
+    "auditor-claude": {"audit-result", "next", "status", "metrics", "validate", "diagnose"},
 }
 
 INACTIVE_READ_ONLY_FLOWCTL_COMMANDS = {
@@ -57,6 +68,7 @@ INACTIVE_READ_ONLY_FLOWCTL_COMMANDS = {
     "-h",
     "diagnose",
     "metrics",
+    "scope-check",
     "status",
     "validate",
 }
@@ -126,18 +138,52 @@ FLOW_OWNERS = {
     "implementer": {"pre-summary.md", "loop-state.md", "report.md", "summary.md"},
 }
 
-SECRET_PATH_PATTERNS = (
+HARD_SECRET_PATH_PATTERNS = (
     ".env",
     ".env.*",
     "*.pem",
     "*.key",
     "*.p12",
     "*.pfx",
+    "**/.aws/**",
+    "**/.ssh/**",
+)
+
+# ファイル名だけでは実credentialか、credentialを扱う通常の実装かを判別できない。
+# 実データの秘密情報パスは常時拒否し、こちらは固定済みのソース・テストだけを
+# policyと内容検査の両方で限定的に扱うための名前分類である。
+SENSITIVE_SOURCE_NAME_PATTERNS = (
     "*credential*",
     "*credentials*",
     "*secret*",
-    "**/.aws/**",
-    "**/.ssh/**",
+    "*token*",
+)
+
+SOURCE_CODE_SUFFIXES = frozenset(
+    {
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cs",
+        ".cjs",
+        ".go",
+        ".java",
+        ".js",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".mjs",
+        ".php",
+        ".py",
+        ".rb",
+        ".rs",
+        ".scala",
+        ".sh",
+        ".swift",
+        ".ts",
+        ".tsx",
+        ".zsh",
+    }
 )
 
 DEFAULT_FORMAL_DOC_GLOBS = (
@@ -294,6 +340,31 @@ DEPENDENCY_MANIFESTS = {
 SECRET_VALUE_PATTERN = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{12,}|"
     r"(?:password|passwd|token|secret|api[_-]?key)\s*[=:]\s*\S+)",
+    re.IGNORECASE,
+)
+
+# 通常のsource codeに現れるtoken変数やtest fixtureではなく、値そのものが
+# 漏えいしている可能性が高い形式だけを、モデルへ内容を返さず検出する。
+HIGH_CONFIDENCE_SOURCE_SECRET_PATTERN = re.compile(
+    r"(?:"
+    r"sk-[A-Za-z0-9_-]{12,}|"
+    r"AKIA[0-9A-Z]{16}|"
+    r"gh[pousr]_[A-Za-z0-9_]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|"
+    r"eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}|"
+    r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?)://[^\s:/]+:[^\s@/]+@|"
+    r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----"
+    r")",
+    re.IGNORECASE,
+)
+
+HARD_SECRET_COMMAND_REFERENCE = re.compile(
+    r"(?:^|[\s'\"=])(?:[^\s'\"=]*/)?(?:"
+    r"\.env(?:\.[^\s/'\"]+)?|"
+    r"[^\s/'\"]+\.(?:pem|key|p12|pfx)|"
+    r"\.(?:aws|ssh)/[^\s'\"]*|"
+    r"credentials\.(?:json|ya?ml|ini|txt)"
+    r")(?=$|[\s/'\"])",
     re.IGNORECASE,
 )
 
@@ -480,6 +551,43 @@ def parse_scope_baseline(scope_file: Path) -> tuple[dict[str, dict[str, Any]], l
     return requirements, errors
 
 
+def parse_owner_approval_summary(scope_file: Path) -> tuple[dict[str, str], list[str]]:
+    """Read the concise explanation an owner must see before a new scope lock."""
+    if not scope_file.is_file():
+        return {}, [f"スコープ基準ファイルが存在しません: {scope_file}"]
+    text = scope_file.read_text(encoding="utf-8")
+    section = re.search(
+        r"^## オーナー承認サマリ\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if section is None:
+        return {}, [
+            "scope-baseline.mdに『## オーナー承認サマリ』がありません。"
+            "オーナーが実行前に理由を確認できるよう、"
+            "『範囲・上限の理由』『分割・移行判断』を記載してください"
+        ]
+
+    labels = {
+        "範囲・上限の理由": "scope_reason",
+        "分割・移行判断": "transition_decision",
+    }
+    values: dict[str, str] = {}
+    for line in section.group("body").splitlines():
+        match = re.match(r"^\s*[-*]\s*([^:：]+)\s*[:：]\s*(\S.*?)\s*$", line)
+        if match is None:
+            continue
+        key = labels.get(match.group(1).strip())
+        if key:
+            values[key] = match.group(2).strip()
+    missing = [label for label, key in labels.items() if not values.get(key)]
+    if missing:
+        return values, [
+            "『## オーナー承認サマリ』に次を記載してください: " + "、".join(missing)
+        ]
+    return values, []
+
+
 def load_scope_lock(scope_file: Path) -> dict[str, Any] | None:
     path = scope_lock_path(scope_file)
     if not path.is_file():
@@ -500,6 +608,14 @@ def validate_scope_lock(scope_file: Path) -> dict[str, Any]:
         raise FlowError("スコープ基準が不正です:\n- " + "\n- ".join(errors))
     if lock.get("requirements") != requirements:
         raise FlowError("スコープ基準の解析結果が固定時と一致しません")
+    # 新しいscope-lockだけはオーナー向け説明を固定する。既存の固定済みtaskを
+    # 更新導入だけで止めないよう、owner_summaryを持たない旧lockは互換扱いにする。
+    if "owner_summary" in lock:
+        owner_summary, owner_errors = parse_owner_approval_summary(scope_file)
+        if owner_errors:
+            raise FlowError("オーナー承認サマリに不備があります:\n- " + "\n- ".join(owner_errors))
+        if lock.get("owner_summary") != owner_summary:
+            raise FlowError("オーナー承認サマリが固定時と一致しません。再固定が必要です")
     return lock
 
 
@@ -525,7 +641,7 @@ def load_policy(task_dir: Path) -> dict[str, Any]:
     path = policy_path(task_dir)
     if not path.is_file():
         raise FlowError(
-            f"flowctl未初期化です: {task_dir}。PMが flowctl init を実行してください"
+            f"機械管理policyはありません: {task_dir}。文書運用ではこの工程コマンドは不要です"
         )
     policy = read_json(path)
     if policy.get("schema_version") != SCHEMA_VERSION:
@@ -626,17 +742,51 @@ def transition(
 
 
 def is_secret_path(relative_path: str) -> bool:
+    """Return whether a path is a real secret-data path, not merely a source name.
+
+    Names such as ``credential.service.ts`` are common implementation files.  They
+    remain subject to the normal locked-path policy and a content scan at the
+    candidate-diff gate, but are not rejected just because of their basename.
+    """
     normalized = normalize_relative(relative_path)
     parts = normalized.split("/")
     basename = parts[-1] if parts else normalized
     if basename == ".env.example" or basename.endswith(".env.example"):
         return False
     candidates = {normalized, basename}
-    return any(
+    hard_match = any(
         fnmatch.fnmatch(candidate.lower(), pattern.lower())
         for candidate in candidates
-        for pattern in SECRET_PATH_PATTERNS
+        for pattern in HARD_SECRET_PATH_PATTERNS
     )
+    if hard_match:
+        return True
+    is_sensitive_name = any(
+        fnmatch.fnmatch(candidate.lower(), pattern.lower())
+        for candidate in candidates
+        for pattern in SENSITIVE_SOURCE_NAME_PATTERNS
+    )
+    return is_sensitive_name and Path(normalized).suffix.lower() not in SOURCE_CODE_SUFFIXES
+
+
+def is_sensitive_source_path(relative_path: str) -> bool:
+    """Whether a source/test filename has a sensitive-looking basename."""
+    normalized = normalize_relative(relative_path)
+    if Path(normalized).suffix.lower() not in SOURCE_CODE_SUFFIXES:
+        return False
+    basename = Path(normalized).name.lower()
+    return any(fnmatch.fnmatch(basename, pattern.lower()) for pattern in SENSITIVE_SOURCE_NAME_PATTERNS)
+
+
+def contains_high_confidence_source_secret(path: Path) -> bool:
+    """Inspect source text without returning a matched value to the caller."""
+    if not path.is_file() or path.suffix.lower() not in SOURCE_CODE_SUFFIXES:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    return HIGH_CONFIDENCE_SOURCE_SECRET_PATTERN.search(text) is not None
 
 
 def path_matches(path: str, patterns: Sequence[str]) -> bool:
@@ -681,18 +831,86 @@ def flow_artifact_allowed(role: str, relative_path: str) -> bool:
     if role == "tl":
         return "/tech-lead/" in f"/{normalized}"
     if role == "auditor-codex":
-        return bool(re.fullmatch(r"audit-codex(?:-[1-9][0-9]*)?\.md", name))
+        return bool(re.fullmatch(r"audit-codex(?:-[\w-]+)?\.md", name))
     if role == "auditor-claude":
-        return bool(re.fullmatch(r"audit-claude(?:-[1-9][0-9]*)?\.md", name))
+        return bool(re.fullmatch(r"audit-claude(?:-[\w-]+)?\.md", name))
     if role == "pm" and "/tech-lead/" in f"/{normalized}":
         return True
-    return name in FLOW_OWNERS.get(role, set())
+    return any(
+        name == owned or (name.startswith(owned.removesuffix(".md") + "-") and name.endswith(".md"))
+        for owned in FLOW_OWNERS.get(role, set())
+    )
+
+
+def document_policy(task_dir: Path) -> dict[str, Any]:
+    """Use PM-owned instruction paths without manufacturing workflow completion.
+
+    A previously locked feature cannot be silently downgraded by creating a
+    policyless sibling task. Its existing machine-managed route remains binding.
+    """
+    task_dir = task_dir.resolve()
+    root = find_managed_root(task_dir)
+    if root is None or not task_dir.is_dir():
+        raise FlowError("対象プロジェクトの既存taskディレクトリを指定してください")
+    try:
+        relative = task_dir.relative_to(root / "docs" / "flow")
+    except ValueError as error:
+        raise FlowError("task-dirは対象プロジェクトのdocs/flow配下を指定してください") from error
+    if not relative.parts or any(part.startswith(".") for part in relative.parts):
+        raise FlowError("docs/flow内の機能またはtaskを指定してください")
+    for ancestor in (task_dir, *task_dir.parents):
+        if ancestor == root / "docs" / "flow":
+            break
+        if policy_path(ancestor).exists() or scope_lock_path(ancestor / "scope-baseline.md").exists():
+            raise FlowError("この機能には固定スコープまたはpolicyがあります。文書運用へ迂回せず既存の機械管理taskを使ってください")
+    instruction = task_dir / "instruction.md"
+    if instruction.is_symlink() or not instruction.is_file():
+        raise FlowError("PMのinstruction.mdと変更許可パスが必要です。工程の再初期化は不要です")
+    text = instruction.read_text(encoding="utf-8")
+    sections = re.findall(
+        r"^## 実装担当の変更許可パス\s*$\n(.*?)(?=^##\s|\Z)",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    if len(sections) != 1:
+        raise FlowError("instruction.mdに『## 実装担当の変更許可パス』を1節だけ記載してください")
+    allowed = []
+    for line in sections[0].splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"\s*[-*]\s*`([^`]+)`\s*", line)
+        if not match:
+            raise FlowError("変更許可パスは『- `相対パスまたは狭いglob`』で記載してください")
+        raw = match.group(1).replace("\\", "/")
+        normalized = Path(raw).as_posix()
+        first_part = normalized.split("/", 1)[0]
+        if (
+            Path(raw).is_absolute() or ".." in Path(raw).parts
+            or raw.startswith("~") or any(part in {".git", ".ai-devteam"} for part in Path(raw).parts)
+            or normalized in {".", "*", "**", "**/*"} or is_secret_path(normalized)
+            or is_formal_doc(normalized) or normalized.startswith(("docs/flow/", ".codex/", ".claude/"))
+            or normalized in {"AGENTS.md", "CLAUDE.md"}
+            or not first_part or any(char in first_part for char in "*?[{")
+        ):
+            raise FlowError("変更許可パスにプロジェクト外・全体・秘密情報・文書／管理領域は指定できません")
+        allowed.append(normalized)
+    if not allowed:
+        raise FlowError("実装担当の変更許可パスが空です")
+    return {"workflow": "documents", "allowed_write_globs": sorted(set(allowed))}
 
 
 def check_role_write_state(role: str | None, task_dir: Path | None, relative_path: str) -> str | None:
     if role is None or task_dir is None or not policy_path(task_dir).is_file():
         return None
     state = current_state(load_events(task_dir))
+    # PM may prepare/triage its own handoff artifacts while implementation or
+    # audits are running. This never transitions the task or grants code access.
+    if role == "pm" and flow_artifact_allowed(role, relative_path):
+        name = Path(relative_path).name
+        if state in {"audit_ready", "auditing", "owner_close", "closed"} and name in {
+            "spec.md", "instruction.md", "audit-request.md", "implementation-review.md"
+        }:
+            return "確定した監査・クローズ境界の根拠は変更できません。現在地・triage・指示案へ記録してください"
+        return None
     if state not in ROLE_WRITE_STATES.get(role, set()):
         return f"{role}は現在工程「{state}」ではファイルを変更できません"
     normalized = normalize_relative(relative_path)
@@ -701,7 +919,13 @@ def check_role_write_state(role: str | None, task_dir: Path | None, relative_pat
             normalized.startswith("docs/flow/")
             and Path(normalized).name in {"pre-summary.md", "loop-state.md"}
         ):
-            return "実装前サマリのオーナー承認前はプロダクト差分を変更できません"
+            return "実装前確認の完了前はプロダクト差分を変更できません"
+    if role == "implementer" and not normalize_relative(relative_path).startswith("docs/flow/"):
+        policy = load_policy(task_dir)
+        expected = policy.get("instruction_sha256")
+        instruction = task_dir / "instruction.md"
+        if expected and (not instruction.is_file() or sha256_file(instruction) != expected):
+            return "指示書が更新されています。PMのinstruction-readyと実装担当の再確認まで製品変更はできません"
     return None
 
 
@@ -720,6 +944,8 @@ def check_write_path(
     path = normalize_relative(relative_path)
     if is_secret_path(path):
         return f"秘密情報を含み得るパスは読み書き禁止です: {path}"
+    if path == ".git" or path.startswith(".git/"):
+        return "Git管理領域は編集ツールから変更できません"
     if path in {"AGENTS.md", "CLAUDE.md"} or path.startswith((".codex/", ".claude/")):
         return f"プロジェクト規約・エージェント設定はオーナー管理です: {path}"
     if "/.ai-devteam/" in f"/{path}/" or path.startswith(".ai-devteam/"):
@@ -747,19 +973,19 @@ def check_write_path(
                 in_scope = (
                     path in feature_files
                     or path.startswith(f"{feature}/tech-lead/")
-                    or (parent == relative_task and Path(path).name in FLOW_OWNERS["pm"])
+                    or (parent == relative_task and flow_artifact_allowed(role, path))
                 )
             elif role == "tl":
                 in_scope = path.startswith(f"{feature}/tech-lead/")
             elif role == "implementer":
-                in_scope = parent == relative_task and Path(path).name in FLOW_OWNERS["implementer"]
+                in_scope = parent == relative_task and flow_artifact_allowed(role, path)
             elif role == "auditor-codex":
                 in_scope = parent == relative_task and bool(
-                    re.fullmatch(r"audit-codex(?:-[1-9][0-9]*)?\.md", Path(path).name)
+                    re.fullmatch(r"audit-codex(?:-[\w-]+)?\.md", Path(path).name)
                 )
             elif role == "auditor-claude":
                 in_scope = parent == relative_task and bool(
-                    re.fullmatch(r"audit-claude(?:-[1-9][0-9]*)?\.md", Path(path).name)
+                    re.fullmatch(r"audit-claude(?:-[\w-]+)?\.md", Path(path).name)
                 )
             else:
                 in_scope = False
@@ -780,7 +1006,12 @@ def check_write_path(
         if is_formal_doc(path, policy) and not is_generated_doc(path, policy):
             return f"正式ドキュメントはPM所有です: {path}"
         if policy is None:
-            return "flowctlのtask policyへ関連付けるまで実装できません"
+            if task_dir is None:
+                return "対象taskとPMの指示書へ関連付けるまで実装できません"
+            try:
+                policy = document_policy(task_dir)
+            except (FlowError, OSError, UnicodeError) as error:
+                return str(error)
         allowed = policy.get("allowed_write_globs", [])
         if not allowed:
             return "指示書品質ゲートで変更許可パスが固定されるまで実装できません"
@@ -804,9 +1035,9 @@ def check_capability_write(
         or basename.startswith("requirements") and basename.endswith(".txt")
     ) and "dependency-install" not in capabilities:
         return "依存関係ファイルの変更にはオーナーによる dependency-install の一時許可が必要です"
-    parts = {part.lower() for part in Path(path).parts}
-    if ("migrations" in parts or basename == "schema.prisma") and "migration" not in capabilities:
-        return "schema・migrationファイルの変更にはオーナーによる migration の一時許可が必要です"
+    # schema/migration *source* is governed by the locked implementation scope.
+    # The migration capability remains required only for commands that actually
+    # connect to / mutate an isolated database (see MIGRATION_COMMAND).
     return None
 
 
@@ -836,7 +1067,7 @@ def relative_to_root(path: str, root: Path, cwd: Path) -> str:
 
 
 def current_capabilities(task_dir: Path | None, role: str | None = None) -> set[str]:
-    if task_dir is None or not policy_path(task_dir).is_file():
+    if task_dir is None:
         return set()
     now = utc_now()
     granted: dict[tuple[str, str], dt.datetime] = {}
@@ -867,12 +1098,10 @@ def check_bash_command(
         return None
     if SECRET_VALUE_PATTERN.search(command):
         return "コマンドに秘密情報らしい値が含まれるため実行できません"
-    lowered = command.lower()
-    if any(
-        token in lowered
-        for token in (".env", "id_rsa", "id_ed25519", ".pem", "credentials", "secret_key")
-    ) and ".env.example" not in lowered:
-        return "秘密情報を含み得るファイルや値をコマンドから参照できません"
+    for reference in HARD_SECRET_COMMAND_REFERENCE.finditer(command):
+        filename = Path(reference.group(0).strip(" \t\n'\"=")).name.lower()
+        if filename != ".env.example":
+            return "秘密情報を含み得るファイルや値をコマンドから参照できません"
     if GIT_MUTATION.search(command) or GH_MUTATION.search(command):
         return "git変更操作はオーナーだけが実行できます"
     if HARD_DENY_COMMAND.search(command):
@@ -955,14 +1184,6 @@ def parse_instruction(task_dir: Path, policy: dict[str, Any]) -> tuple[list[str]
         if not declared_domains.issubset(approved_domains):
             extra = "、".join(sorted(declared_domains - approved_domains))
             errors.append(f"オーナー固定範囲にないリスク領域があります: {extra}")
-
-    preflight = re.findall(
-        r"^\s*[-*]?\s*実装前内部検証\s*[:：]\s*(必須|不要)\s*$", text, re.MULTILINE
-    )
-    if len(preflight) != 1:
-        errors.append("『実装前内部検証: 必須』または『実装前内部検証: 不要』を1行だけ記載してください")
-    elif policy.get("pre_evaluator_required") and preflight[0] != "必須":
-        errors.append("高リスクまたは複合タスクでは実装前内部検証を必須にしてください")
 
     header_pattern = re.compile(
         r"\|\s*受け入れ条件\s*\|\s*外部から観測できる期待結果\s*\|\s*検証方法\s*\|"
@@ -1103,6 +1324,10 @@ def validate_implementation_scope(task_dir: Path, policy: dict[str, Any]) -> lis
         if is_secret_path(path):
             errors.append(f"秘密情報を含み得るファイルが差分にあります（内容は開きません）: {path}")
             continue
+        candidate = root / path
+        if candidate.is_file() and contains_high_confidence_source_secret(candidate):
+            errors.append(f"秘密情報らしい値を含む可能性があるソース差分です（値は表示しません）: {path}")
+            continue
         if is_formal_doc(path, policy) and not is_generated_doc(path, policy):
             expected = policy.get("pm_formal_doc_snapshots", {}).get(path)
             candidate = root / path
@@ -1239,6 +1464,22 @@ def required_auditors(policy: dict[str, Any]) -> list[str]:
     return ["codex", "claude"]
 
 
+def scope_lock_metrics(task_dir: Path, policy: dict[str, Any]) -> tuple[int, int]:
+    """Return feature-level lock history without relying on mutable prose docs."""
+    try:
+        root = git_root(task_dir)
+        scope_file = root / str(policy.get("scope_file", ""))
+        history = scope_lock_path(scope_file).parent / "scope-lock-events"
+    except FlowError:
+        return 0, 0
+    if not history.is_dir():
+        return 0, 0
+    return (
+        len(list(history.glob("*-locked.json"))),
+        len(list(history.glob("*-unlocked.json"))),
+    )
+
+
 def calculate_metrics(task_dir: Path, now: dt.datetime | None = None) -> dict[str, Any]:
     policy = load_policy(task_dir)
     events = load_events(task_dir)
@@ -1252,11 +1493,17 @@ def calculate_metrics(task_dir: Path, now: dt.datetime | None = None) -> dict[st
     starts: dict[str, tuple[dt.datetime, str]] = {}
     intervals: list[tuple[dt.datetime, dt.datetime]] = []
     session_ids: set[str] = set()
+    unmeasured_session_starts = 0
     for event in events:
         if event.get("kind") == "session_started":
+            if event.get("data", {}).get("measurement") == "manual-start-only":
+                unmeasured_session_starts += 1
+                continue
             span = str(event.get("data", {}).get("span_id", event.get("id")))
             starts[span] = (parse_time(event["at"]), str(event.get("session_id") or span))
             session_ids.add(str(event.get("session_id") or span))
+        elif event.get("kind") == "session_measurement_unavailable":
+            unmeasured_session_starts += 1
         elif event.get("kind") == "session_ended":
             span = str(event.get("data", {}).get("span_id", ""))
             if span in starts:
@@ -1281,6 +1528,22 @@ def calculate_metrics(task_dir: Path, now: dt.datetime | None = None) -> dict[st
 
     submissions = sum(1 for event in events if event.get("kind") == "implementation_submitted")
     returns = sum(1 for event in events if event.get("kind") == "pm_returned")
+    tooling_blockers = sum(
+        1
+        for event in events
+        if event.get("kind") in {"tooling_blocker_detected", "tooling_blocker_reclassified"}
+    )
+    tooling_recoveries = sum(1 for event in events if event.get("kind") == "tooling_blocker_resolved")
+    owner_start_approvals = sum(
+        1 for event in events if event.get("kind") == "implementation_start_approved"
+    )
+    owner_capability_grants = sum(
+        1 for event in events if event.get("kind") == "capability_granted"
+    )
+    owner_command_rejections = sum(
+        1 for event in events if event.get("kind") == "owner_command_rejected"
+    )
+    feature_scope_locks, feature_scope_unlocks = scope_lock_metrics(task_dir, policy)
     round_one = audit_results_for_round(events, 1)
     required = required_auditors(policy)
     if not all(auditor in round_one for auditor in required):
@@ -1296,6 +1559,12 @@ def calculate_metrics(task_dir: Path, now: dt.datetime | None = None) -> dict[st
         finished = parse_time(transitions[index + 1]["at"]) if index + 1 < len(transitions) else end_time
         stage_seconds[state] = stage_seconds.get(state, 0.0) + max(0.0, (finished - began).total_seconds())
 
+    timing_quality = (
+        "概算（lifecycle hook未検出を含む）"
+        if unmeasured_session_starts
+        else "自動記録"
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "state": current_state(events),
@@ -1305,11 +1574,20 @@ def calculate_metrics(task_dir: Path, now: dt.datetime | None = None) -> dict[st
         "active_seconds": round(active_seconds, 3),
         "wait_seconds": round(max(0.0, cycle_seconds - active_seconds), 3),
         "session_count": len(session_ids),
+        "unmeasured_session_starts": unmeasured_session_starts,
         "implementation_submissions": submissions,
         "pm_returns": returns,
         "pm_return_rate": round(returns / submissions, 4) if submissions else None,
+        "tooling_blockers": tooling_blockers,
+        "tooling_recoveries": tooling_recoveries,
+        "owner_start_approvals": owner_start_approvals,
+        "owner_capability_grants": owner_capability_grants,
+        "owner_command_rejections": owner_command_rejections,
+        "feature_scope_locks": feature_scope_locks,
+        "feature_scope_unlocks": feature_scope_unlocks,
         "first_audit_pass": first_audit_pass,
         "stage_seconds": {key: round(value, 3) for key, value in sorted(stage_seconds.items())},
+        "timing_quality": timing_quality,
         "updated_at": current.isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
@@ -1324,19 +1602,51 @@ def format_duration(seconds: float) -> str:
 def metrics_markdown(metrics: dict[str, Any]) -> str:
     first_pass = metrics["first_audit_pass"]
     first_pass_text = "未確定" if first_pass is None else ("合格" if first_pass else "不合格")
+    stage_labels = {
+        "planning": "PM planning工程の滞在時間（調査・執筆・待ちを含む）",
+        "tl_review": "Tech Lead判断",
+        "instruction_ready": "実装担当開始待ち",
+        "implementation_preflight": "実装前確認",
+        "implementation": "実装・テスト",
+        "implementation_paused": "実装停止",
+        "pm_review": "PM提出確認",
+        "awaiting_commit": "コミット待ち",
+        "post_commit_review": "コミット後確認",
+        "audit_ready": "監査開始待ち",
+        "auditing": "独立監査",
+        "audit_triage": "監査整理",
+        "owner_close": "クローズ待ち",
+    }
+    stage_lines = [
+        f"- {stage_labels.get(state, state)}: {format_duration(seconds)}"
+        for state, seconds in metrics.get("stage_seconds", {}).items()
+    ]
     return "\n".join(
         (
             "# ai-devteam 自動メトリクス",
             "",
             f"- 現在工程: {metrics['state']}",
             f"- 経過時間: {format_duration(metrics['cycle_seconds'])}",
-            f"- セッション稼働時間（重複除外）: {format_duration(metrics['active_seconds'])}",
-            f"- 待ち時間: {format_duration(metrics['wait_seconds'])}",
+            f"- hookで観測したセッション開放時間（重複除外）: {format_duration(metrics['active_seconds'])}",
+            f"- セッション外の工程滞在時間: {format_duration(metrics['wait_seconds'])}",
+            f"- 計測精度: {metrics.get('timing_quality', '不明')}",
             f"- 独立セッション数: {metrics['session_count']}",
+            f"- hook未検出のrole-start: {metrics.get('unmeasured_session_starts', 0)}",
             f"- 実装提出回数: {metrics['implementation_submissions']}",
             f"- PM差し戻し回数: {metrics['pm_returns']}",
             f"- PM差し戻し率: {metrics['pm_return_rate'] if metrics['pm_return_rate'] is not None else '未確定'}",
+            f"- ツール起因停止／復旧: {metrics['tooling_blockers']} / {metrics['tooling_recoveries']}",
+            f"- オーナー開始承認: {metrics['owner_start_approvals']}",
+            f"- オーナー一時権限付与: {metrics['owner_capability_grants']}",
+            f"- 拒否されたオーナー操作: {metrics['owner_command_rejections']}",
+            f"- 機能スコープ固定／解除: {metrics['feature_scope_locks']} / {metrics['feature_scope_unlocks']}",
             f"- 初回監査合格: {first_pass_text}",
+            "",
+            "## 工程別時間",
+            "",
+            *(stage_lines or ["- 記録なし"]),
+            "",
+            "PM計画・指示書には既存調査、仕様確認、執筆、工程内の待ち時間を含む。個別作業の秒単位計測ではない。",
             "",
             "プロンプト本文、会話ログ、秘密情報、認証情報は記録しない。",
             "",
@@ -1473,6 +1783,8 @@ def register_runtime_role(
     role: str,
     task_dir: Path | None,
 ) -> str | None:
+    cwd = cwd.resolve()
+    root = root.resolve()
     record = load_runtime_session(provider, session_id) or {
         "schema_version": SCHEMA_VERSION,
         "provider": provider,
@@ -1485,13 +1797,24 @@ def register_runtime_role(
     existing_role = record.get("role")
     if existing_role and existing_role != role:
         return f"この独立セッションは既に{existing_role}です。{role}へ役割変更できません"
+    if existing_role and Path(record["root"]).resolve() != root.resolve():
+        return "この独立セッションは別のプロジェクトへ関連付け済みです"
+    if role.startswith("auditor-") and role.removeprefix("auditor-") != provider:
+        return "監査役と実際のproviderが一致しません"
     record["role"] = role
     if task_dir is not None:
         resolved_task = (cwd / task_dir).resolve() if not task_dir.is_absolute() else task_dir.resolve()
         try:
-            resolved_task.relative_to(root)
+            relative_task = resolved_task.relative_to(root / "docs" / "flow")
         except ValueError:
-            return "task-dirは管理対象プロジェクト内に限定してください"
+            return "task-dirは管理対象プロジェクトのdocs/flow内に限定してください"
+        if not relative_task.parts or any(part.startswith(".") for part in relative_task.parts):
+            return "docs/flow内の機能またはtaskを指定してください"
+        if role == "implementer" and not policy_path(resolved_task).is_file():
+            try:
+                document_policy(resolved_task)
+            except (FlowError, OSError, UnicodeError) as error:
+                return str(error)
         existing_task = record.get("task_dir")
         if existing_task and Path(existing_task).resolve() != resolved_task:
             previous_task = Path(existing_task).resolve()
@@ -1513,6 +1836,9 @@ def register_runtime_role(
             record["event_recorded"] = False
             record.pop("ended_at", None)
         record["task_dir"] = str(resolved_task)
+        if role == "implementer" and not policy_path(resolved_task).is_file():
+            instruction = resolved_task / "instruction.md"
+            record["instruction_sha256"] = sha256_file(instruction) if instruction.is_file() else None
         if policy_path(resolved_task).is_file() and not record.get("event_recorded"):
             with task_lock(resolved_task):
                 append_event(
@@ -1553,7 +1879,7 @@ def find_task_from_runtime(record: dict[str, Any] | None) -> Path | None:
     if not record or not record.get("task_dir"):
         return None
     task = Path(str(record["task_dir"]))
-    return task if policy_path(task).is_file() else None
+    return task
 
 
 def deny_output(reason: str) -> dict[str, Any]:
@@ -1570,7 +1896,20 @@ def handle_hook(payload: dict[str, Any], provider: str) -> dict[str, Any] | None
     event = str(payload.get("hook_event_name", ""))
     session_id = str(payload.get("session_id", ""))
     cwd = Path(str(payload.get("cwd") or os.getcwd())).resolve()
+    record = load_runtime_session(provider, session_id) if session_id else None
     root = find_managed_root(cwd)
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        command = str(tool_input.get("command") or tool_input.get("cmd") or "")
+        if parse_role_start_command(command):
+            supplied_root = command_option(command, "--project-root")
+            if supplied_root:
+                root = find_managed_root((cwd / Path(supplied_root).expanduser()).resolve())
+    if record and record.get("root") and not (
+        isinstance(tool_input, dict)
+        and parse_role_start_command(str(tool_input.get("command") or tool_input.get("cmd") or ""))
+    ):
+        root = Path(record["root"])
     if not session_id or root is None:
         return None
     if event == "SessionStart":
@@ -1640,10 +1979,7 @@ def handle_hook(payload: dict[str, Any], provider: str) -> dict[str, Any] | None
             return None
         if flowctl_command and flowctl_command not in ROLE_FLOWCTL_COMMANDS.get(role, set()):
             return deny_output(f"{role or '役割未登録'}には flowctl {flowctl_command} の実行権限がありません")
-        if role in {"auditor-codex", "auditor-claude"} and flowctl_command in {
-            "audit-start",
-            "audit-result",
-        }:
+        if role in {"auditor-codex", "auditor-claude"} and flowctl_command == "audit-result":
             expected_auditor = role.removeprefix("auditor-")
             if command_option(command, "--auditor") != expected_auditor:
                 return deny_output(f"{role}は{expected_auditor}監査だけを登録できます")
@@ -1673,6 +2009,11 @@ def handle_hook(payload: dict[str, Any], provider: str) -> dict[str, Any] | None
             return deny_output("変更対象パスを検査できないため書き込みを停止しました")
         for path in paths:
             relative = relative_to_root(path, root, cwd)
+            if role == "implementer" and task_dir and policy is None and not relative.startswith("docs/flow/"):
+                instruction = task_dir / "instruction.md"
+                current_hash = sha256_file(instruction) if instruction.is_file() else None
+                if current_hash != (record or {}).get("instruction_sha256"):
+                    return deny_output("指示書が更新されています。同じ実装担当が更新内容を確認してrole-startで再関連付けしてください")
             reason = check_role_write_state(role, task_dir, relative)
             if reason:
                 return deny_output(reason)
@@ -1834,6 +2175,11 @@ def aggregate_metrics(flow_root: Path) -> dict[str, Any]:
     values = [calculate_metrics(task) for task in task_dirs]
     submissions = sum(item["implementation_submissions"] for item in values)
     returns = sum(item["pm_returns"] for item in values)
+    tooling_blockers = sum(item["tooling_blockers"] for item in values)
+    tooling_recoveries = sum(item["tooling_recoveries"] for item in values)
+    owner_start_approvals = sum(item["owner_start_approvals"] for item in values)
+    owner_capability_grants = sum(item["owner_capability_grants"] for item in values)
+    owner_command_rejections = sum(item["owner_command_rejections"] for item in values)
     decided = [item["first_audit_pass"] for item in values if item["first_audit_pass"] is not None]
     return {
         "task_count": len(values),
@@ -1842,6 +2188,11 @@ def aggregate_metrics(flow_root: Path) -> dict[str, Any]:
         else 0,
         "session_count": sum(item["session_count"] for item in values),
         "pm_return_rate": round(returns / submissions, 4) if submissions else None,
+        "tooling_blockers": tooling_blockers,
+        "tooling_recoveries": tooling_recoveries,
+        "owner_start_approvals": owner_start_approvals,
+        "owner_capability_grants": owner_capability_grants,
+        "owner_command_rejections": owner_command_rejections,
         "first_audit_pass_rate": round(sum(1 for item in decided if item) / len(decided), 4)
         if decided
         else None,

@@ -54,7 +54,7 @@ for f in pm tech-lead implementer auditor; do
   fi
 done
 
-echo "note: restart Codex/Claude sessions to load the installed lifecycle hooks"
+echo "note: restart sessions only if lifecycle hook configuration was added or changed; otherwise reread the updated common rules and current role Skill in the existing session"
 echo "note: ai-devteam is opt-in; roleless sessions stay normal until an explicit Skill runs flowctl role-start"
 echo "note: existing projects are not rewritten; replace each project's AGENTS.md with $repo_dir/AGENTS.md when common rules change"
 echo "note: run ~/.ai-devteam/bin/flowctl diagnose --project-root <project> after replacing AGENTS.md"

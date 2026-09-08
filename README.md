@@ -1,149 +1,141 @@
 # codex-devteam
 
-PM、TL（Tech Lead）、実装担当、Codex監査、Claude監査を独立セッションで運用する、明示起動型のAI開発フローです。実装担当内では、Builderと読み取り専用の内部検証担当が制限付きループを行います。
+PM、TL（Tech Lead）、実装担当、Codex監査、Claude監査を独立セッションで運用するAI開発フローです。PMが案件の目的・現在地・リスクから必要な作業を決め、実装担当が既存パターンに沿って実装・検証・修正を行います。
 
-`flowctl`が、有効化された役割セッションの工程順、変更範囲、オーナー承認、監査数を検証します。AIや別セッションを自動起動するツールではありません。
+`docs/flow/`に決定と証拠を残して引き継ぎ、`flowctl`は役割・パスのガード、状態記録、検査、貼付け文面を補助します。文書による運用を基本とし、固定した範囲・工程の機械管理も選べます。
 
-## 有効化
+## 役割を開始する
 
-新しいセッションは通常モードで始まり、ai-devteamは無効です。プロジェクトに`AGENTS.md`や`docs/flow/`があっても、通常の質問・調査・実装をai-devteamの工程へ自動変換しません。
+新しいセッションではai-devteamは無効です。役割を明示して開始した後は、同じセッションで役割を継続します。途中の質問や「進めて」で呼出し名を再指定する必要はありません。説明や引用に呼出し名が現れただけでは開始しません。
 
-| ユーザーの依頼 | 動作 |
-| --- | --- |
-| 役割指定なし | 通常のCodexとして動作。ai-devteamのフック制限、工程遷移、ハンドオフを適用しない |
-| `$pm`、`$tl`、`$implementer`、`$auditor`で役割開始を明示 | Skillが最初に`flowctl role-start`を実行し、成功後からそのセッションだけai-devteamを有効化 |
-| 呼出し名を質問・説明・比較・引用・例文で記載 | Skill本文が添付されても役割を開始せず、通常モードを維持 |
+| 役割 | Codex | Claude |
+| --- | --- | --- |
+| PM | `$pm` | `/pm` |
+| Tech Lead | `$tl` | `/tl` |
+| 実装担当 | `$implementer` | `/implementer` |
+| 独立監査 | `$auditor` | `/auditor` |
 
-役割開始後はセッション終了まで同じ役割を維持します。通常モードのセッションを途中から役割セッションとして使う場合も、ユーザーが役割開始を明示した場合に限ります。
-Codex Skillは`allow_implicit_invocation: false`に設定し、モデルによる暗黙選択を無効化しています。
+この配布物はCodexの4役とClaude監査を含みます。Claudeを主担当にする場合はclaude-devteam側の配布物を使います。
 
-## 運用原則
-
-| 領域 | 現行ルール |
-| --- | --- |
-| スコープ | 外部成果・全変更パス・リスク区分／領域・ファイル数／差分行数をオーナー固定 |
-| TL | 上流設計、重大な技術・セキュリティ判断が必要な場合だけ使用 |
-| 実装 | 既存パターン調査、実装、テスト、内部検証、修正を上限付きで反復 |
-| 文書 | 正式ドキュメントはPMだけが更新。実装担当は影響を報告 |
-| 工程 | 実装担当から必ずPMへ戻し、PM確認・オーナーコミット後だけ監査可能 |
-| 監査 | 独立2監査が既定。1監査はオーナーがスコープ固定時に選んだ場合だけ |
-| 制御 | `role-start`後、フックが役割外書込み、Git変更、秘密情報、本番・共有環境等を拒否 |
-| 計測 | 所要時間、セッション数、PM差し戻し率、初回監査合格を自動記録 |
-
-## セットアップ
-
-マスターリポジトリで実行します。
-
-```sh
-sh scripts/install.sh
-```
-
-この処理はテスト後、役割Skill、`~/.ai-devteam/bin/flowctl`、Codex/Claudeのフック、Codexの役割別権限プロファイルを配備します。グローバルフックは通常モードでは素通しし、`role-start`後だけ制御します。配備後はCodexとClaudeの既存セッションを終了し、新しいセッションを開始してください。
-
-プロジェクトでは最新版の`AGENTS.md`をルートへ置きます。Claudeも使う場合は同じ内容を`CLAUDE.md`へ置きます。
-
-```sh
-cp AGENTS.md <project>/AGENTS.md
-cp AGENTS.md <project>/CLAUDE.md
-```
-
-`AGENTS.md`、`CLAUDE.md`、`docs/flow/`はローカル工程ファイルとしてgitignoreします。役割制御はグローバルフックが行うため、`claude/settings.json`の旧Git deny雛形はプロジェクトへコピーしません。
-
-旧版の雛形をコピー済みのプロジェクトでは、まず`diagnose`で確認し、検出された場合だけオーナーが自分のターミナルで除去します。既知のGit deny 27件と読み取りallow 7件だけを削除し、その他のClaude設定を保持したバックアップを作成します。
-
-```sh
-~/.ai-devteam/bin/flowctl diagnose --project-root <project>
-~/.ai-devteam/bin/flowctl remove-legacy-claude-guards \
-  --project-root <project> \
-  --owner-confirmed
-```
+各役割はユーザーが独立セッションで開始します。PM・実装担当は同じ機能内で継続利用できます。別の正式役割をサブエージェントで代行しません。現役割内の調査や検証では利用できます。
 
 ## 基本フロー
 
 ```text
-PM: 壁打ち・根拠確認・scope-baseline/spec/tasks/instruction
- ↓ 必要な場合だけ
-TL: 上流の技術・設計・セキュリティ判断
- ↓
-実装担当: 既存調査 → pre-summary → オーナー開始承認
-           → 実装・テスト → 内部検証 → 修正・再検証
- ↓
-PM: 未コミット差分と証拠を裏取り、正式ドキュメントを更新
- ↓
+PM: 壁打ち、既存決定の引継ぎ、仕様・指示書
+  → 新しい上流判断が必要な場合だけTL
+実装担当: 既存調査 → 実装 → 検証 → 修正
+  → 高リスクは実装後の内部Evaluator
+  → report / summary / loop-stateをPMへ提出
+PM: 仕様・実差分・検証を裏取り、正式文書を更新
 オーナー: コミット
- ↓
-PM: 確定差分を再確認しaudit-request.mdを作成
- ↓
-Codex監査・Claude監査（既定2、独立セッション）
- ↓
-PM: 監査整理
- ↓
-オーナー: クローズ
+PM: 確定した差分で監査依頼を作成
+Codex監査・Claude監査: 独立した確認
+PM: 結果整理。残件は実装担当へ戻す
+オーナー: リリース・クローズ判断
 ```
 
-各役割はユーザーが新しい独立セッションで`$pm`等を明示して開始します。PMと実装担当は同じ機能内でセッションを再利用できます。TLは相談ごと、監査は監査ごとに新規セッションを使います。
+監査は基本2件、オーナーが明示した場合だけ1件です。テスト成功や内部Evaluatorだけで完了とせず、PM確認と独立監査を行います。既にコミット済みの作業は、その差分と証拠を確認して利用します。
 
-## スコープと不足の扱い
+## 文書資産の読み方・残し方
 
-PMは`docs/flow/<feature>/scope-baseline.md`へ次を記載します。
+機能ごとの`tasks.md`冒頭に、PMが短い「現在地」を維持します。既存の同等の索引があればそれを使います。
+
+| 現在地に残すもの | 目的 |
+| --- | --- |
+| 目的と完了条件、オーナーの決定 | セッション途中でも目標を維持する |
+| 現在repo/task、作業状況、確認日時 | 途中参加で現在地を把握する |
+| 最新指示・報告・監査整理・関連決定のリンク | 根拠へ直接進む |
+| 未解決事項と次の担当・作業 | 次の依頼を具体化する |
+| 確認済みGit境界、並行差分、関連repo | 古い証拠と現在差分を混同しない |
+
+ユーザーが指定した資料と現在地を起点に、必要な仕様・TL決定・監査・報告を参照します。過去資料は判断の根拠として保存し、全資料・全Git履歴を毎回読み直しません。名前や更新日時だけで最新・完了と断定せず、参照関係と対象差分を確認します。
+
+主な配置は次のとおりです。既存名の指示書や監査はリンクで再利用できます。
+
+```text
+docs/flow/<feature>/
+  spec.md                       確定仕様
+  tasks.md                      現在地とタスク一覧
+  scope-baseline.md             機械固定を選ぶ場合の承認範囲
+  tech-lead/                    上流の相談と決定
+  task-NN/
+    instruction.md              現行指示の入口
+    pre-summary.md              既存調査
+    loop-state.md               実装・検証・修正の記録
+    report.md / summary.md      実装提出
+    implementation-review.md    PM確認
+    audit-request.md            PMの監査依頼
+    audit-codex*.md              Codex監査
+    audit-claude*.md             Claude監査
+    audit-triage.md              PMの監査整理
+```
+
+工程資料と規約ファイルはローカル資産としてgitignoreします。機能完了後も削除しません。恒久的に必要な仕様はPMが正式文書へ反映してコミット対象にします。README・ガイド・設計書等の正式文書を実装担当に編集させません。
+
+実装中に追加・変更するコードコメントの文末には「。」を付けません。JavaScript・TypeScript等の関数説明は複数行JSDocとし、必要なら引数の意味・制約を`@param`へ記します。定数・型の説明と関数内の補足は`//`を使います。ドキュメント・工程資料の句点は使用できます。表記統一だけの既存コメント一括変更は行いません。
+
+マイグレーションは既存ツール・導入済みCLIによる生成を基本とします。Prismaの`migrate dev`は適用も伴い、`--create-only`でも開発DB・shadow DBを使用するため、承認済み隔離環境で扱います。データ移行等の未適用SQL補正や、手書きSQLが正規方式の案件は許容します。適用済み履歴は編集せず、新しいマイグレーションで修正します。
+
+## 状況に合う工程を使う
+
+- 壁打ち・キャッチアップでは、必要な資料を読んで現在地や選択肢を返します。工程初期化や全テストを定例追加しません。
+- 既存要件の不具合・監査是正では、最新指摘と現在差分から残件を指示書にまとめます。既存の設計判断を再利用します。
+- 新規開発では、期待結果、対象外、責務、リスク、検証方法を具体化します。
+- 認可・テナント分離・秘密情報・不可逆処理等の方式が新たに未決ならTLへ相談します。既存設計の重大な欠陥も対象です。DBや外部APIを触るという名称だけではTL承認を追加しません。
+- ユーザーの質問・候補案は自動採用しません。採用済み目的に不可欠な範囲内の不足は同じtaskへ含め、新しい成果・責務・リスクは差分を示して判断します。
+- 「急いで」は監査・検証・リリース条件を緩和する許可ではありません。
+
+## 文書運用と機械管理
+
+文書運用ではPMの指示書に、目的、対象外、受け入れ条件、検証方法、変更許可パスを記します。許可パスの節だけはガードが読む形式です。
 
 ```markdown
-## 承認対象
+## 実装担当の変更許可パス
 
-| 要求ID | 承認済みの外部成果 | 変更可能パス | 許可するリスク領域 | リスク区分 | 変更上限 |
-| --- | --- | --- | --- | --- | --- |
-| 要求1 | 利用者が安全にデータを削除できる | `src/delete/**`<br>`tests/delete/**` | 不可逆削除 | 高 | 20ファイル / 2000行 |
-
-## 明示的な対象外
-
-- Slack通知、課金変更、別サービスの改修は行わない。
+- `src/profile/**`
+- `tests/profile/**`
 ```
 
-オーナーは仕様承認と同時に固定します。
+実際の既存配置に合わせた狭い相対パス・globを使います。実装担当はrole-start時に指示書へ関連付けられ、正式文書・秘密情報・許可パス外の編集を拒否されます。実装前確認後はループへ入り、提出と監査への受け渡しは文書で行います。scope-lock、init、preflight-complete、submit等を文書taskで定例実行しません。
+
+工程と変更範囲を機械的に固定する場合は、PMがscope-check後、オーナーがscope-lockし、PMがinitとinstruction-readyを行います。実装担当は軽量preflightとsubmit、PMはpm-review、commit-recorded、audit-ready、triageを該当する節目に使います。追加のオーナー開始承認はありません。
+
+既存の機械管理taskは固定パス、変更上限、監査数、能力制限を維持します。記録が古いことを理由にpolicyを消したり別の文書taskへ逃がしたりしません。機械状態が実装中でもPMの読取り・現在地更新・triage・指示準備は可能です。実行中の指示の差替えは担当を止めてから行います。同じ範囲の是正では既存taskのinstruction-readyを使えます。固定範囲を本当に増やす場合だけ再承認します。
+
+未初期化の既存資料はそのまま利用します。旧taskのadoptは、機械管理へ移すことを選んだときだけ使います。すでに固定スコープがある機能の未登録taskは、その固定を迂回せず既存の管理経路を使います。
+
+flowctlの表示は登録された記録です。文書や現在差分が示す事実との食い違いは明記し、ツールの表示だけで未実装・合格・リリース可を断定しません。nextの案内が最新証拠と矛盾する場合は、開始や合格の案内をそのまま渡しません。
+
+## コマンドの担当
+
+| 担当 | 操作 |
+| --- | --- |
+| 各AI役割 | role-startを初回に実行。現在地や対象が既知なら同じ登録を反復しない |
+| PM | 必要資料・指示・提出確認・監査整理。機械管理を選んだ場合だけ対応する工程コマンド |
+| 実装担当 | 実装ループとPM提出。機械管理の場合だけ対応する工程コマンド |
+| オーナー | Git、リリース、最終判断。必要な固定・取込み・危険操作の期限付き許可 |
+| フック | 明示開始した役割の操作を自動検査。通常セッションは対象外 |
+
+所在が不明なときの読取り補助です。指定ディレクトリと直下のプロジェクトのdocs/flowを列挙し、現在taskは推測しません。
 
 ```sh
-~/.ai-devteam/bin/flowctl scope-lock \
-  --scope-file docs/flow/<feature>/scope-baseline.md \
-  --audits 2 \
-  --owner-confirmed
+~/.ai-devteam/bin/flowctl status \
+  --project-root <project-or-workspace>
 ```
 
-実装中の発見は次の基準で扱います。
-
-- 元の外部成果がその変更なしでは成立せず、固定パス・リスク・変更上限内に収まる不足：根拠を残して同じタスクへ含める
-- 質問、壁打ち、候補案：回答しても自動的には実装へ追加しない
-- 既存方針で決められない上流の技術・セキュリティ判断：実装を止め、PMが`tl-request`で独立TLへ渡す
-- 新しい外部成果、利用者挙動、不可逆境界、変更パス、サービス責務、リスク領域：PMが差分化し、オーナー再承認後だけ追加
-- 「あると良い」改善、将来対応、周辺整理：別タスク候補
-
-不足を同じタスクへ含める場合も、実コード・既存契約・再現テストで不可欠性を説明し、`loop-state.md`へ残します。
-変更可能パスはコード・テスト・設定・migration・PMが更新する正式ドキュメントを含む全候補です。`instruction.md`では、その内から正式ドキュメントを除いた実装担当のパスだけを選びます。
-
-範囲拡大を採用する場合は、実装を止め、PMの差分提示とオーナー再固定後に`instruction-ready`を通します。同じ実装担当セッションでpre-summaryと必要な実装前内部検証を更新し、オーナーの`start-approve`後に再開します。リスク区分または監査構成自体が変わる場合は新しいtaskへ分けますが、同じ機能の実装担当セッションは再利用できます。
-
-## flowctlを実行する人とタイミング
-
-| 実行者 | タイミング | 主なコマンド |
-| --- | --- | --- |
-| フック | AIがツールを使う直前。通常モードは素通し | `flowctl hook`（自動） |
-| PM | 初期化、必要時のTL相談、指示書完成、差分確認、監査準備、監査整理 | `init`、`tl-request`、`instruction-ready`、`pm-review`、`audit-ready`、`triage` |
-| 実装担当 | 役割開始、途中フィードバック、PM提出 | `role-start`、`feedback`、`submit` |
-| TL | 判断完了 | `tl-complete` |
-| 監査 | 開始、結果登録 | `role-start`、`audit-result` |
-| オーナー | スコープ、開始承認、一時権限、最終終了 | `scope-lock`、`start-approve`、`approve`、`close` |
-
-役割開始を明示されたAIは、各Skillに従って節目のコマンドを自発的に実行します。通常モードでは実行しません。オーナー専用コマンドをAIフック経由で実行すると拒否されます。
+対象taskが既知なら次を使えます。statusはファイルを書き換えません。
 
 ```sh
-~/.ai-devteam/bin/flowctl status --task-dir docs/flow/<feature>/task-01
-~/.ai-devteam/bin/flowctl next --task-dir docs/flow/<feature>/task-01 --provider codex
+~/.ai-devteam/bin/flowctl status \
+  --task-dir docs/flow/<feature>/task-01
 ```
 
-`next`は文面を表示するだけです。セッションの起動とプロンプトの貼り付けはユーザーが行います。
+オーナー用コマンドには、承認対象、必要理由、実行後の工程を添えます。コマンドはshコードブロック、実際のバックスラッシュ継続、1オプション1行で示し、パス途中を改行しません。
 
-## 一時権限
+## 安全制御と計測
 
-実credential、本番環境、共有DBは常時禁止です。隔離DB、migration、依存変更、外部ネットワークが必要な場合だけ、オーナーが対象taskへ期限付きで許可します。
+役割外の編集、秘密情報パス、Git変更、実credential・本番・共有DB、未許可のDB・migration・依存変更・ネットワーク操作を制限します。隔離DB等の期限付き能力は文書運用でも利用できます。
 
 ```sh
 ~/.ai-devteam/bin/flowctl approve \
@@ -155,61 +147,35 @@ PMは`docs/flow/<feature>/scope-baseline.md`へ次を記載します。
   --owner-confirmed
 ```
 
-許可は工程・役割・スコープ制約を解除しません。
+能力の付与は製品範囲や共有／本番環境の許可ではありません。フックは対応ツールの呼出しを検査する補助制御であり、子プロセス内部まで隔離するOS sandboxではありません。必要なら同梱のCodex権限プロファイルを併用します。
 
-## 指標
+機械管理taskでは、工程滞在時間、独立セッション数、PM差し戻し率、初回監査結果等をイベントから集計します。工程内待ちを含み、純粋な執筆時間ではありません。hook未検出や文書運用の全工程は未計測として扱います。測れていない時間を0秒・改善済みと報告しません。
 
-```sh
-~/.ai-devteam/bin/flowctl metrics --task-dir docs/flow/<feature>/task-01
-~/.ai-devteam/bin/flowctl metrics --flow-root docs/flow
-```
+内部Evaluatorは高リスク時の補助確認です。形式検査だけで別コンテキストの実体や品質を証明しません。文書運用の監査合格・次工程は、PMと独立監査が証拠に基づいて判断します。
 
-イベントは、有効化された役割セッションだけを対象に`task-NN/.ai-devteam/`へ追記専用で保存します。通常セッション、プロンプト本文、会話ログ、秘密情報、credentialは記録しません。
+## セットアップ
 
-## 進行中taskへの導入
-
-新規taskはPMが`flowctl init`を行います。すでに進行中なら、PMがscope-baseline.mdとinstruction.mdを新形式に整え、オーナーがscope-lock後に安全側の工程へ取り込みます。
+配布元で実行します。
 
 ```sh
-~/.ai-devteam/bin/flowctl adopt \
-  --task-dir docs/flow/<feature>/task-04 \
-  --scope-file docs/flow/<feature>/scope-baseline.md \
-  --scope-id 要求1 \
-  --risk high \
-  --branch feature/example \
-  --base <base-sha> \
-  --state implementation \
-  --pre-evaluator required \
-  --reason "新しい工程制御へ移行" \
-  --owner-confirmed
+sh scripts/install.sh
 ```
 
-取込み可能な状態は`planning`、`instruction_ready`、`implementation_preflight`、`implementation`、`pm_review`です。証拠が不足する場合は安全側へ戻して取り込みます。
+テスト後に役割Skill、flowctl、Codex/Claudeフック、Codex権限プロファイルを配備します。プロジェクトへAGENTS.mdとCLAUDE.mdを配置します。旧claude/settings.jsonのGit deny雛形はコピーしません。
 
-## 物理制御の範囲
-
-`role-start`後のフックは、役割外ファイル、正式ドキュメントの実装担当編集、Git変更、秘密情報パス、本番・共有環境、未許可DB・migration等を直接拒否します。通常モードにはこの制御を適用しません。任意の子プロセス内部まで完全に隔離するOS sandboxではないため、Codexでは役割別プロファイルも併用します。
+すでにフックが導入済みなら、規約とSkillを既存セッションで読み直して継続できます。フックを初めて導入・設定変更した場合は、クライアントに読み込ませるためセッションを再開します。
 
 ```sh
-codex -p ai-devteam-pm
-codex -p ai-devteam-implementer
-codex -p ai-devteam-review
+~/.ai-devteam/bin/flowctl diagnose \
+  --project-root <project>
 ```
 
-`~/.codex/config.toml`に旧`sandbox_mode`設定があると新しいpermission profileが優先されません。`flowctl diagnose --project-root <project>`で状態を確認してください。既存設定はinstallerが無断で削除しません。
+旧Claude静的Git権限が検出された場合だけ、オーナーがremove-legacy-claude-guardsを使えます。既知の旧権限だけをバックアップして除去し、その他の設定を保持します。
 
-## マスター構成
+## 検証
 
-```text
-AGENTS.md                         共通規約
-codex/skills/                    Codexの役割Skill
-codex/skills/*/agents/openai.yaml Codex Skillの明示起動ポリシー
-claude/skills/auditor/           Claude監査Skill
-claude/settings.json             静的denyを持たない参照用設定
-codex/profiles/                  Codex最小権限プロファイル
-scripts/flowctl.py               工程CLI
-scripts/flowctl_lib.py           検証・フック・指標
-scripts/validate_handoff.py      実装提出の形式検証
-tests/test_flowctl.py            回帰テスト
-scripts/install.sh               検証と配備
+```sh
+python3 -B -m unittest discover -s tests
 ```
+
+回帰テストは役割継続、文書運用、既存機械管理、固定スコープの迂回拒否、監査・秘密情報・権限境界、読取り専用の所在確認を検証します。PMの判断品質はtests/pm-scenarios.mdの運用シナリオでも確認します。単体テストの合格だけで実案件の速度や判断精度を保証しません。

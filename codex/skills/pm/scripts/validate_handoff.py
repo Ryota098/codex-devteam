@@ -112,54 +112,6 @@ def validate_table(
     return errors
 
 
-def validate_preflight(text: str, required: bool) -> list[str]:
-    errors: list[str] = []
-    section = markdown_section(text, "実装前検証証跡")
-    if section is None:
-        return ["loop-state.mdに『## 実装前検証証跡』がない"] if required else []
-
-    fields = parse_fields(section)
-    required_fields = (
-        "実施要否",
-        "実施方式",
-        "起動回数",
-        "起動記録",
-        "検証対象",
-        "最終判定",
-        "未解決事項",
-        "実装開始前のプロダクト差分",
-    )
-    for field in required_fields:
-        if not fields.get(field):
-            errors.append(f"実装前検証証跡に『{field}』がない")
-
-    if fields.get("実施要否") != "必須":
-        errors.append("実装前検証証跡の『実施要否』は『必須』にする")
-    if fields.get("実施方式") != "別コンテキストのサブエージェント":
-        errors.append("実装前検証の実施方式は『別コンテキストのサブエージェント』と明記する")
-    if not re.fullmatch(r"[1-9][0-9]*", fields.get("起動回数", "")):
-        errors.append("実装前検証の起動回数は1以上の整数にする")
-    if fields.get("起動記録", "") in {"", "なし", "不明", "未確認"}:
-        errors.append("実装前検証の起動記録には実際の識別子、または識別子が未提供だった事実を記録する")
-    if fields.get("最終判定") != "実装開始可":
-        errors.append("PM提出には実装前検証の最終判定『実装開始可』が必要")
-    if fields.get("未解決事項") != "なし":
-        errors.append("未解決事項がある実装前検証では実装を開始しない")
-    if fields.get("実装開始前のプロダクト差分") != "なし":
-        errors.append("実装前検証より先にプロダクト差分を作成してはならない")
-
-    errors.extend(
-        validate_table(
-            section,
-            "### 確認対象別判定",
-            "| 確認対象 | 判定 | 根拠 |",
-            "確認対象別",
-            expected_result="実装開始可",
-        )
-    )
-    return errors
-
-
 def validate_loop_state(path: Path) -> list[str]:
     errors: list[str] = []
     section = markdown_section(path.read_text(encoding="utf-8"), "内部検証証跡")
@@ -281,18 +233,9 @@ def validate_task_dir(task_dir: Path) -> list[str]:
         return errors
 
     instruction = (task_dir / "instruction.md").read_text(encoding="utf-8")
-    markers = re.findall(
-        r"^\s*[-*]?\s*実装前内部検証\s*[:：]\s*(必須|不要)\s*$",
-        instruction,
-        flags=re.MULTILINE,
-    )
-    if len(markers) != 1:
-        errors.append("instruction.mdには『実装前内部検証: 必須』または『実装前内部検証: 不要』を1行だけ明記する")
-
     loop_text = (task_dir / "loop-state.md").read_text(encoding="utf-8")
     errors.extend(validate_summary(task_dir / "summary.md"))
     errors.extend(validate_report(task_dir / "report.md"))
-    errors.extend(validate_preflight(loop_text, required=markers == ["必須"]))
     errors.extend(validate_loop_state(task_dir / "loop-state.md"))
 
     acceptance = markdown_section(instruction, "受け入れ条件")
@@ -324,8 +267,6 @@ def write_fixture(task_dir: Path, summary: str, loop_state: str, report: str) ->
     (task_dir / "instruction.md").write_text(
         """# 指示書
 
-- 実装前内部検証: 必須
-
 ## 受け入れ条件
 
 | 受け入れ条件 | 外部から観測できる期待結果 | 検証方法 |
@@ -352,23 +293,6 @@ def self_test() -> int:
         )
     )
     valid_loop = """# ループ
-
-## 実装前検証証跡
-
-- 実施要否: 必須
-- 実施方式: 別コンテキストのサブエージェント
-- 起動回数: 1
-- 起動記録: agent-pre-123
-- 検証対象: 指示書、仕様、実装前サマリ、既存実装
-- 最終判定: 実装開始可
-- 未解決事項: なし
-- 実装開始前のプロダクト差分: なし
-
-### 確認対象別判定
-
-| 確認対象 | 判定 | 根拠 |
-| --- | --- | --- |
-| 業務入口と全呼出し元 | 実装開始可 | route.tsとservice.ts |
 
 ## 内部検証証跡
 
@@ -425,15 +349,13 @@ def self_test() -> int:
             raise AssertionError("規定外summaryタグを検出できなかった")
         if not any("内部検証証跡" in error for error in invalid_errors):
             raise AssertionError("内部検証証跡の欠落を検出できなかった")
-        if not any("実装前検証証跡" in error for error in invalid_errors):
-            raise AssertionError("必須の実装前検証証跡の欠落を検出できなかった")
         if not any("正式ドキュメント影響" in error for error in invalid_errors):
             raise AssertionError("正式ドキュメント影響の欠落を検出できなかった")
         row_errors = validate_task_dir(row_failure)
         if not any("判定は『合格』" in error for error in row_errors):
             raise AssertionError("受け入れ条件単位の不合格を検出できなかった")
 
-    print("self-test: 7 checks passed")
+    print("self-test: 6 checks passed")
     return 0
 
 
