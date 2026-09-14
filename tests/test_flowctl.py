@@ -13,157 +13,54 @@ from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = REPO / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(REPO / "scripts"))
 
 import flowctl  # noqa: E402
 import flowctl_lib as lib  # noqa: E402
 
 
-VALID_SCOPE = """# 承認済みスコープ基準
+NATURAL_INSTRUCTION = """# プロフィール更新
 
-## 承認対象
-
-| 要求ID | 承認済みの外部成果 | 変更可能パス | 許可するリスク領域 | リスク区分 | 変更上限 |
-| --- | --- | --- | --- | --- | --- |
-| 要求1 | 利用者がプロフィール名を安全に更新できる | `src/**`<br>`tests/**` | 入力検証 | 標準 | 10ファイル / 500行 |
-
-## オーナー承認サマリ
-
-- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。
-- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。
-
-## 明示的な対象外
-
-- 通知、課金、認証方式、DB schemaは変更しない。
-"""
-
-
-VALID_INSTRUCTION = """# 実装指示書
-
-- リスク区分: 標準
-- 主要要求ID: 要求1
-- 主要な外部挙動数: 1
-- 主要な外部挙動: 利用者がプロフィール名を安全に更新できる
-- 不可逆境界数: 0
-- 不可逆境界: なし
-- リスク領域: 入力検証
-## 実装担当の変更許可パス
-
-- `src/**`
-- `tests/**`
-
-## 受け入れ条件
-
-| 受け入れ条件 | 外部から観測できる期待結果 | 検証方法 |
-| --- | --- | --- |
-| 条件1（正常な名前更新） | 正常な名前を保存して返す | profile testを実行する |
-"""
-
-
-VALID_SUMMARY = """[TITLE] プロフィール名更新
-[PUBLIC API] 更新API
-[RULES] 入力検証
-[BRANCHES] 正常と拒否
-[ERRORS] 不正入力を拒否
-[ASSUMPTIONS] なし
-[DEVIATION] なし
-"""
-
-
-VALID_PRE_SUMMARY = """# 実装前サマリ
-
-- 既存パターン: src/profile.pyと隣接テストの構成を維持する
-- 予定差分: プロフィール名更新と直接テストだけ
-- 検証方法: profile testを実行する
-- 未解決事項: なし
-"""
-
-
-VALID_LOOP = """# 実装ループ
-
-## 内部検証証跡
-
-- 実施要否: 必須
-- 実施方式: 別コンテキストのサブエージェント
-- 起動回数: 1
-- 起動記録: evaluator-1
-- 検証対象: 現在の候補差分
-- 最終判定: 合格
-- 修正票: なし
-- 対応結果: 修正票なし
-- 合格後の実装・テスト・設定・自動生成物変更: なし
-
-### 受け入れ条件別判定
-
-| 受け入れ条件 | 判定 | 根拠 |
-| --- | --- | --- |
-| 条件1（正常な名前更新） | 合格 | profile test |
-"""
-
-
-VALID_REPORT = """# 実装報告
-
-## 正式ドキュメント影響
-
-- 実装担当による正式ドキュメント変更: なし
-- PM更新候補: なし
-- 更新不要の理由: 公開契約と利用手順は変わらないため
-
-## 受け入れ条件と検証証拠
-
-| 受け入れ条件 | 実装箇所 | 検証証拠 | 結果 |
-| --- | --- | --- | --- |
-| 条件1（正常な名前更新） | src/profile.py | tests/test_profile.py | 成功 |
-
-## 再現可能な検証コマンド
-
-- `python3 -m pytest tests/test_profile.py` 結果: 成功
+目的: 既存のプロフィール更新を安全に修正する
+対象外: READMEとDB schema
+受け入れ条件: 正常値を保存し、不正値を拒否する
+検証: 直接テストと型検査
+変更対象: profile serviceと直接テスト
 """
 
 
 class RepoFixture:
     def __init__(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "project"
         self.flow = self.root / "docs" / "flow" / "profile"
         self.task = self.flow / "task-01"
-        self.scope = self.flow / "scope-baseline.md"
+
+    def setup(self) -> None:
+        self.root.mkdir(parents=True)
+        (self.root / "AGENTS.md").write_text(lib.MANAGED_MARKER + "\n", encoding="utf-8")
+        self.task.mkdir(parents=True)
+        (self.task / "instruction.md").write_text(NATURAL_INSTRUCTION, encoding="utf-8")
+        (self.root / "src").mkdir()
+        (self.root / "src" / "profile.py").write_text("NAME = 'before'\n", encoding="utf-8")
+        (self.root / "package.json").write_text('{"scripts":{"test":"true"}}\n', encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Tests"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=self.root, check=True)
 
     def close(self) -> None:
-        self.temporary.cleanup()
-
-    def git(self, *args: str) -> str:
-        result = subprocess.run(
-            ["git", *args], cwd=self.root, text=True, capture_output=True, check=True
-        )
-        return result.stdout.strip()
-
-    def setup(self) -> str:
-        self.git("init", "-b", "feature/profile")
-        self.git("config", "user.email", "test@example.invalid")
-        self.git("config", "user.name", "flowctl test")
-        (self.root / "AGENTS.md").write_text(lib.MANAGED_MARKER + "\n", encoding="utf-8")
-        (self.root / ".gitignore").write_text("/AGENTS.md\n/docs/flow/\n", encoding="utf-8")
-        (self.root / "src").mkdir()
-        (self.root / "tests").mkdir()
-        (self.root / "src" / "profile.py").write_text("NAME = 'before'\n", encoding="utf-8")
-        (self.root / "tests" / "test_profile.py").write_text("def test_profile():\n    assert True\n", encoding="utf-8")
-        self.flow.mkdir(parents=True)
-        self.task.mkdir()
-        self.scope.write_text(VALID_SCOPE, encoding="utf-8")
-        (self.task / "instruction.md").write_text(VALID_INSTRUCTION, encoding="utf-8")
-        self.git("add", ".gitignore", "src", "tests")
-        self.git("commit", "-m", "initial")
-        return self.git("rev-parse", "HEAD")
+        self.temp.cleanup()
 
 
 class FlowctlTest(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = RepoFixture()
-        self.base = self.fixture.setup()
+        self.fixture.setup()
         self.old_cwd = Path.cwd()
         os.chdir(self.fixture.root)
+        self.fake_home = self.fixture.root / "home"
 
     def tearDown(self) -> None:
         os.chdir(self.old_cwd)
@@ -176,1542 +73,170 @@ class FlowctlTest(unittest.TestCase):
             code = flowctl.main(list(args))
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def lock_and_init(self, *, audits: int = 2, extra: tuple[str, ...] = ()) -> None:
-        lock_args = [
-            "scope-lock",
-            "--scope-file",
-            str(self.fixture.scope),
-            "--audits",
-            str(audits),
-            "--owner-confirmed",
-        ]
-        if audits == 1:
-            lock_args.extend(("--single-auditor", "codex"))
-        code, _, error = self.invoke(
-            *lock_args,
-        )
-        self.assertEqual(code, 0, error)
-        arguments = [
-            "init",
-            "--task-dir",
-            str(self.fixture.task),
-            "--scope-file",
-            str(self.fixture.scope),
-            "--scope-id",
-            "要求1",
-            "--risk",
-            "standard",
-            "--audits",
-            str(audits),
-            "--branch",
-            "feature/profile",
-            "--base",
-            self.base,
-            "--tl",
-            "not-required",
-            "--pre-evaluator",
-            "not-required",
-            *extra,
-        ]
-        code, _, error = self.invoke(*arguments)
-        self.assertEqual(code, 0, error)
-
-    def make_handoff(self) -> None:
-        (self.fixture.task / "summary.md").write_text(VALID_SUMMARY, encoding="utf-8")
-        (self.fixture.task / "loop-state.md").write_text(VALID_LOOP, encoding="utf-8")
-        (self.fixture.task / "report.md").write_text(VALID_REPORT, encoding="utf-8")
-
-    def begin_implementation(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-
-    def complete_lightweight_preflight(self) -> None:
-        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        code, _, error = self.invoke(
-            "preflight-complete", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 0, error)
-
-    def test_one_audit_must_be_fixed_by_owner_scope_lock(self) -> None:
-        code, _, error = self.invoke(
-            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
-        )
-        self.assertEqual(code, 0, error)
-        code, _, error = self.invoke(
-            "init",
-            "--task-dir",
-            str(self.fixture.task),
-            "--scope-file",
-            str(self.fixture.scope),
-            "--scope-id",
-            "要求1",
-            "--risk",
-            "standard",
-            "--audits",
-            "1",
-            "--single-auditor",
-            "codex",
-            "--branch",
-            "feature/profile",
-            "--base",
-            self.base,
-            "--tl",
-            "not-required",
-            "--pre-evaluator",
-            "not-required",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("scope-lock時に固定", error)
-
-    def test_scope_check_prints_a_copyable_multiline_lock_command(self) -> None:
-        code, output, error = self.invoke(
-            "scope-check",
-            "--scope-file",
-            str(self.fixture.scope),
-            "--audits",
-            "2",
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("```sh", output)
-        self.assertIn("~/.ai-devteam/bin/flowctl scope-lock \\", output)
-        self.assertIn(f"  --scope-file {self.fixture.scope.resolve()} \\", output)
-        self.assertIn("  --audits 2 \\", output)
-        self.assertIn("  --owner-confirmed", output)
-
-    def test_init_creates_a_missing_task_directory(self) -> None:
-        (self.fixture.task / "instruction.md").unlink()
-        self.fixture.task.rmdir()
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        code, _, error = self.invoke(
-            "init",
-            "--task-dir",
-            str(self.fixture.task),
-            "--scope-file",
-            str(self.fixture.scope),
-            "--scope-id",
-            "要求1",
-            "--risk",
-            "standard",
-            "--branch",
-            "feature/profile",
-            "--base",
-            self.base,
-            "--tl",
-            "not-required",
-        )
-        self.assertEqual(code, 0, error)
-        self.assertTrue(lib.policy_path(self.fixture.task).is_file())
-
-    def test_temporary_capability_is_bound_to_role(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(
-            self.invoke(
-                "approve",
-                "--task-dir",
-                str(self.fixture.task),
-                "--capability",
-                "isolated-db",
-                "--minutes",
-                "10",
-                "--reason",
-                "破棄可能な専用DBで結合テスト",
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        self.assertIn("isolated-db", lib.current_capabilities(self.fixture.task, "implementer"))
-        self.assertNotIn("isolated-db", lib.current_capabilities(self.fixture.task, "pm"))
-
-    def test_scope_lock_detects_post_approval_change(self) -> None:
-        code, _, error = self.invoke(
-            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
-        )
-        self.assertEqual(code, 0, error)
-        self.fixture.scope.write_text(VALID_SCOPE.replace("入力検証", "入力検証、Slack通知"), encoding="utf-8")
-        with self.assertRaises(lib.FlowError):
-            lib.validate_scope_lock(self.fixture.scope)
-
-    def test_scope_lock_requires_owner_facing_explanation(self) -> None:
-        self.fixture.scope.write_text(
-            VALID_SCOPE.replace(
-                "## オーナー承認サマリ\n\n"
-                "- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。\n"
-                "- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。\n\n",
-                "",
-            ),
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke(
-            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("オーナー承認サマリ", error)
-
-    def test_scope_lock_prints_owner_receipt(self) -> None:
-        code, output, error = self.invoke(
-            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("オーナー承認記録", output)
-        self.assertIn("範囲・上限の理由", output)
-        self.assertIn("この操作だけでは許可しないこと", output)
-
-    def test_scope_check_validates_before_owner_is_asked_to_lock(self) -> None:
-        self.fixture.scope.write_text(
-            VALID_SCOPE.replace(
-                "## オーナー承認サマリ\n\n"
-                "- 範囲・上限の理由: プロフィール名更新の実装と直接テストだけを対象にし、既存契約を変えずに入力検証を確認するため。\n"
-                "- 分割・移行判断: 新規task。既存進行中taskの取込みではなく、この外部挙動だけを独立して扱う。\n\n",
-                "",
-            ),
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
-        self.assertEqual(code, 1)
-        self.assertIn("オーナー承認サマリ", error)
-
-        self.fixture.scope.write_text(VALID_SCOPE, encoding="utf-8")
-        code, output, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
-        self.assertEqual(code, 0, error)
-        self.assertIn("scope check: PASS", output)
-        self.assertIn("オーナー承認記録", output)
-        self.assertEqual(
-            self.invoke("scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed")[0],
-            0,
-        )
-        code, output, error = self.invoke("scope-check", "--scope-file", str(self.fixture.scope))
-        self.assertEqual(code, 0, error)
-        self.assertIn("オーナー操作は不要", output)
-
-    def test_legacy_scope_lock_remains_idempotent(self) -> None:
-        requirements, errors = lib.parse_scope_baseline(self.fixture.scope)
-        self.assertEqual(errors, [])
-        lock_path = lib.scope_lock_path(self.fixture.scope)
-        lock_path.parent.mkdir(parents=True)
-        lock_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "active": True,
-                    "scope_file": "docs/flow/profile/scope-baseline.md",
-                    "sha256": lib.sha256_file(self.fixture.scope),
-                    "requirements": requirements,
-                    "audit_count": 2,
-                    "single_auditor": None,
-                }
-            ),
-            encoding="utf-8",
-        )
-        code, output, error = self.invoke(
-            "scope-lock", "--scope-file", str(self.fixture.scope), "--owner-confirmed"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("legacy active", output)
-
-    def test_scope_lock_cannot_change_audit_policy_without_unlock(self) -> None:
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--audits",
-                "2",
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        code, _, error = self.invoke(
-            "scope-lock",
-            "--scope-file",
-            str(self.fixture.scope),
-            "--audits",
-            "1",
-            "--single-auditor",
-            "codex",
-            "--owner-confirmed",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("監査数・監査担当も固定中", error)
-
-    def test_init_cannot_raise_owner_locked_risk(self) -> None:
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        code, _, error = self.invoke(
-            "init",
-            "--task-dir",
-            str(self.fixture.task),
-            "--scope-file",
-            str(self.fixture.scope),
-            "--scope-id",
-            "要求1",
-            "--risk",
-            "high",
-            "--branch",
-            "feature/profile",
-            "--base",
-            self.base,
-            "--tl",
-            "required",
-            "--tl-reason",
-            "不可逆境界を確認",
-            "--pre-evaluator",
-            "required",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("リスク区分はオーナー", error)
-
-    def test_owner_can_adopt_existing_task_at_safe_state(self) -> None:
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        code, _, error = self.invoke(
-            "adopt",
-            "--task-dir",
-            str(self.fixture.task),
-            "--scope-file",
-            str(self.fixture.scope),
-            "--scope-id",
-            "要求1",
-            "--risk",
-            "standard",
-            "--branch",
-            "feature/profile",
-            "--base",
-            self.base,
-            "--state",
-            "instruction_ready",
-            "--pre-evaluator",
-            "not-required",
-            "--reason",
-            "既存taskを安全側から移行",
-            "--owner-confirmed",
-        )
-        self.assertEqual(code, 0, error)
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "instruction_ready")
-        self.assertTrue(lib.load_policy(self.fixture.task)["adopted"])
-
-    def test_instruction_cannot_expand_scope_paths_or_outcome(self) -> None:
-        self.lock_and_init()
-        expanded = VALID_INSTRUCTION.replace("- `tests/**`", "- `tests/**`\n- `integrations/slack/**`")
-        (self.fixture.task / "instruction.md").write_text(expanded, encoding="utf-8")
-        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("変更可能パスを越えています", error)
-
-        (self.fixture.task / "instruction.md").write_text(
-            VALID_INSTRUCTION.replace(
-                "利用者がプロフィール名を安全に更新できる",
-                "プロフィールを更新してSlack通知も送る",
-            ),
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("承認済み外部成果と同一文", error)
-
-    def test_instruction_ready_preflights_candidate_diff_before_owner_gate(self) -> None:
-        self.lock_and_init()
-        unexpected = self.fixture.root / "unexpected"
-        unexpected.mkdir()
-        (unexpected / "outside.py").write_text("VALUE = 1\n", encoding="utf-8")
-        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("候補差分の事前検証", error)
-        self.assertIn("変更許可パス外", error)
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "planning")
-
-    def test_sensitive_named_source_is_allowed_but_secret_value_is_not_exposed(self) -> None:
-        source = self.fixture.root / "src" / "workspace-db-credential.service.ts"
-        source.write_text("export const credentialName = 'managed';\n", encoding="utf-8")
-        self.assertFalse(lib.is_secret_path("src/workspace-db-credential.service.ts"))
-        self.assertTrue(lib.is_sensitive_source_path("src/workspace-db-credential.service.ts"))
-        self.lock_and_init()
-        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 0, error)
-
-        fake_secret = "sk-" + "abcdefghijklmnopqrst"
-        source.write_text(f"export const credential = '{fake_secret}';\n", encoding="utf-8")
-        self.assertTrue(lib.contains_high_confidence_source_secret(source))
-        errors = lib.validate_implementation_scope(self.fixture.task, lib.load_policy(self.fixture.task))
-        self.assertIn("値は表示しません", "\n".join(errors))
-        self.assertNotIn(fake_secret, "\n".join(errors))
-
-    def test_high_confidence_secret_shapes_are_detected_without_returning_values(self) -> None:
-        samples = (
-            "xoxb-123456789012-abcdefghijklmnopqrstuv",
-            "eyJabcdefghijkl.abcdefghijklmnop.abcdefghijklmnop",
-            "postgresql://service-user:private-password@db.example.invalid/app",
-        )
-        source = self.fixture.root / "src" / "settings.ts"
-        for value in samples:
-            source.write_text(f"export const value = '{value}';\n", encoding="utf-8")
-            self.assertTrue(lib.contains_high_confidence_source_secret(source))
-
-    def test_legacy_manual_session_start_is_reported_but_not_counted_as_active(self) -> None:
-        self.lock_and_init()
-        lib.append_event(
-            self.fixture.task,
-            "session_started",
-            role="pm",
-            session_id="manual-legacy",
-            data={"measurement": "manual-start-only", "span_id": "legacy-span"},
-        )
-        metrics = lib.calculate_metrics(self.fixture.task)
-        self.assertEqual(metrics["session_count"], 0)
-        self.assertEqual(metrics["active_seconds"], 0)
-        self.assertEqual(metrics["unmeasured_session_starts"], 1)
-        self.assertIn("概算", metrics["timing_quality"])
-
-    def test_submit_rejects_owner_locked_change_budget_overrun(self) -> None:
-        self.fixture.scope.write_text(
-            VALID_SCOPE.replace("10ファイル / 500行", "1ファイル / 1行"),
-            encoding="utf-8",
-        )
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-        self.make_handoff()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\nMORE = True\n", encoding="utf-8")
-        code, _, error = self.invoke("submit", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("変更上限", error)
-
-    def test_feedback_question_continues_but_scope_change_pauses(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(
-            self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0
-        )
-        self.assertEqual(
-            self.invoke(
-                "role-start", "--role", "implementer", "--task-dir", str(self.fixture.task)
-            )[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "question",
-                "--summary",
-                "境界値の確認",
-            )[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation")
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "scope-change",
-                "--summary",
-                "外部成果の追加候補",
-            )[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation_paused")
-        code, _, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("PMがinstruction-ready", error)
-
-    def test_tooling_blocker_resumes_without_scope_or_owner_reapproval(self) -> None:
-        self.begin_implementation()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "tooling-blocker",
-                "--summary",
-                "候補差分は固定範囲内だがツール検査が停止した",
-            )[0],
-            0,
-        )
-        code, output, error = self.invoke(
-            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("スコープ固定・指示書・オーナー承認を繰り返しません", output)
-        self.assertEqual(self.invoke("resume", "--task-dir", str(self.fixture.task))[0], 0)
-        metrics = lib.calculate_metrics(self.fixture.task)
-        self.assertEqual(metrics["tooling_blockers"], 1)
-        self.assertEqual(metrics["tooling_recoveries"], 1)
-        self.assertEqual(metrics["owner_start_approvals"], 0)
-
-    def test_tooling_blocker_does_not_resume_after_candidate_diff_changes(self) -> None:
-        self.begin_implementation()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "tooling-blocker",
-                "--summary",
-                "ツール検査の互換性問題",
-            )[0],
-            0,
-        )
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'changed again'\n", encoding="utf-8")
-        code, _, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("候補差分が変わっています", error)
-
-    def test_tooling_blocker_does_not_resume_after_instruction_changes(self) -> None:
-        self.begin_implementation()
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "tooling-blocker",
-                "--summary",
-                "ツール検査の互換性問題",
-            )[0],
-            0,
-        )
-        instruction = self.fixture.task / "instruction.md"
-        instruction.write_text(
-            instruction.read_text(encoding="utf-8") + "\n- 追記: 指示書変更\n",
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("指示書が変わっています", error)
-
-    def test_pm_can_recover_legacy_tooling_false_scope_change_without_owner_commands(self) -> None:
-        self.begin_implementation()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "scope-change",
-                "--summary",
-                "旧版の検査器が固定済みソース名を誤分類した",
-            )[0],
-            0,
-        )
-        code, output, error = self.invoke(
-            "recover-tooling",
-            "--task-dir",
-            str(self.fixture.task),
-            "--summary",
-            "検査器の誤分類を修正済み。範囲と指示書は不変",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("recover-toolingは廃止", error)
-
-    def test_legacy_tooling_recovery_rejects_changed_instruction(self) -> None:
-        self.begin_implementation()
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "scope-change",
-                "--summary",
-                "旧版の検査器が誤って範囲変更として登録した",
-            )[0],
-            0,
-        )
-        instruction = self.fixture.task / "instruction.md"
-        instruction.write_text(
-            instruction.read_text(encoding="utf-8") + "\n- 追記: 実際の指示書変更\n",
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke(
-            "recover-tooling",
-            "--task-dir",
-            str(self.fixture.task),
-            "--summary",
-            "検査器を修正済み",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("recover-toolingは廃止", error)
-
-    def test_legacy_tooling_recovery_rejects_changed_candidate_diff(self) -> None:
-        self.begin_implementation()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "scope-change",
-                "--summary",
-                "旧版の検査器が誤って範囲変更として登録した",
-            )[0],
-            0,
-        )
-        (self.fixture.root / "src" / "profile.py").write_text(
-            "NAME = 'changed again'\n", encoding="utf-8"
-        )
-        code, _, error = self.invoke(
-            "recover-tooling",
-            "--task-dir",
-            str(self.fixture.task),
-            "--summary",
-            "検査器を修正済み",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("recover-toolingは廃止", error)
-
-    def test_validate_rechecks_candidate_diff_without_owner_command(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        (self.fixture.task / "pre-summary.md").write_text("# 実装前サマリ\n", encoding="utf-8")
-        unexpected = self.fixture.root / "unexpected"
-        unexpected.mkdir()
-        (unexpected / "outside.py").write_text("VALUE = 1\n", encoding="utf-8")
-        code, _, error = self.invoke("validate", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("変更許可パス外", error)
-        self.assertEqual(lib.calculate_metrics(self.fixture.task)["owner_command_rejections"], 0)
-
-    def test_lightweight_preflight_requires_summary_but_not_owner_approval(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.assertEqual(
-            lib.current_state(lib.load_events(self.fixture.task)), "implementation_preflight"
-        )
-        code, _, error = self.invoke(
-            "preflight-complete", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("pre-summary.md", error)
-        (self.fixture.task / "pre-summary.md").write_text(
-            "# 実装前サマリ\n\n- 既存パターン:\n- 予定差分:\n- 検証方法:\n- 未解決事項: なし\n",
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke(
-            "preflight-complete", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("空または未確認", error)
-        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        profile = self.fixture.root / "src" / "profile.py"
-        profile.write_text("NAME = 'changed-before-preflight'\n", encoding="utf-8")
-        code, _, error = self.invoke(
-            "preflight-complete", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("instruction-ready後", error)
-        profile.write_text("NAME = 'before'\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation")
-        code, output, error = self.invoke(
-            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertNotIn("start-approve", output)
-        self.assertNotIn("preflight-return", output)
-        self.assertIn("~/.ai-devteam/bin/flowctl role-start \\", output)
-        self.assertIn("  --role implementer \\", output)
-
-    def test_legacy_negative_preflight_cannot_be_bypassed(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        policy = lib.load_policy(self.fixture.task)
-        policy.pop("instruction_ready_candidate_diff_sha256", None)
-        lib.save_policy(self.fixture.task, policy)
-        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        (self.fixture.task / "loop-state.md").write_text(
-            "# 旧記録\n\n## 実装前検証証跡\n\n- 最終判定: PM差し戻し\n",
-            encoding="utf-8",
-        )
-        code, _, error = self.invoke(
-            "start-approve",
-            "--task-dir",
-            str(self.fixture.task),
-            "--owner-confirmed",
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("start-approveは廃止", error)
-        code, output, error = self.invoke(
-            "preflight-complete", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("PMへ自動で戻しました", output)
-        self.assertEqual(
-            lib.current_state(lib.load_events(self.fixture.task)), "implementation_paused"
-        )
-
-    def test_tooling_blocker_in_preflight_resumes_to_preflight(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "tooling-blocker",
-                "--summary",
-                "検査器の誤判定",
-            )[0],
-            0,
-        )
-        code, output, error = self.invoke("resume", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 0, error)
-        self.assertIn("implementation_preflight", output)
-        self.assertEqual(
-            lib.current_state(lib.load_events(self.fixture.task)), "implementation_preflight"
-        )
-        (self.fixture.task / "pre-summary.md").write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        self.assertEqual(
-            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-
-    def test_standard_risk_does_not_require_post_evaluator(self) -> None:
-        self.lock_and_init()
-        self.assertFalse(lib.load_policy(self.fixture.task)["post_evaluator_required"])
-
-    def test_scope_change_reapproval_returns_through_preflight(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        pre_summary = self.fixture.task / "pre-summary.md"
-        self.complete_lightweight_preflight()
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "scope-change",
-                "--summary",
-                "検証用ファイルを追加する必要がある",
-            )[0],
-            0,
-        )
-        updated_instruction = VALID_INSTRUCTION + "\n再承認された検証範囲内の局所変更。\n"
-        (self.fixture.task / "instruction.md").write_text(updated_instruction, encoding="utf-8")
-        code, _, error = self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 1)
-        self.assertIn("再固定", error)
-
-        self.assertEqual(
-            self.invoke(
-                "scope-unlock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--reason",
-                "検証範囲を再承認するため",
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        self.fixture.scope.write_text(
-            VALID_SCOPE.replace("10ファイル / 500行", "11ファイル / 600行"),
-            encoding="utf-8",
-        )
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--audits",
-                "2",
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        pre_summary.write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        self.assertEqual(
-            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation")
-
-    def test_mid_implementation_tl_review_returns_to_same_task(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        pre_summary = self.fixture.task / "pre-summary.md"
-        self.complete_lightweight_preflight()
-        self.assertEqual(
-            self.invoke(
-                "feedback",
-                "--task-dir",
-                str(self.fixture.task),
-                "--kind",
-                "tl-review",
-                "--summary",
-                "既存の信頼境界に関する判断が不足",
-            )[0],
-            0,
-        )
-        tech_lead = self.fixture.flow / "tech-lead"
-        tech_lead.mkdir()
-        consultation = tech_lead / "trust-boundary.md"
-        consultation.write_text("# Tech Lead相談\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "tl-request",
-                "--task-dir",
-                str(self.fixture.task),
-                "--consultation-file",
-                str(consultation),
-                "--summary",
-                "既存の信頼境界との整合判断",
-            )[0],
-            0,
-        )
-        decision = tech_lead / "trust-boundary-decision.md"
-        decision.write_text("# Tech Lead判断\n\n既存境界を維持する。\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "tl-complete",
-                "--task-dir",
-                str(self.fixture.task),
-                "--decision-file",
-                str(decision),
-            )[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "implementation_paused")
-        (self.fixture.task / "instruction.md").write_text(
-            VALID_INSTRUCTION + "\nTech Lead判断済みの既存境界を維持する。\n",
-            encoding="utf-8",
-        )
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        pre_summary.write_text(VALID_PRE_SUMMARY, encoding="utf-8")
-        self.assertEqual(
-            self.invoke("preflight-complete", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-
-    def test_initial_tl_requires_registered_consultation(self) -> None:
-        self.assertEqual(
-            self.invoke(
-                "scope-lock",
-                "--scope-file",
-                str(self.fixture.scope),
-                "--owner-confirmed",
-            )[0],
-            0,
-        )
-        self.assertEqual(
-            self.invoke(
-                "init",
-                "--task-dir",
-                str(self.fixture.task),
-                "--scope-file",
-                str(self.fixture.scope),
-                "--scope-id",
-                "要求1",
-                "--risk",
-                "standard",
-                "--branch",
-                "feature/profile",
-                "--base",
-                self.base,
-                "--tl",
-                "required",
-                "--tl-reason",
-                "入力境界の上流判断",
-                "--pre-evaluator",
-                "not-required",
-            )[0],
-            0,
-        )
-        code, _, error = self.invoke(
-            "role-start", "--role", "tl", "--task-dir", str(self.fixture.task)
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("相談資料", error)
-        code, output, error = self.invoke(
-            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("tl-request", output)
-        tech_lead = self.fixture.flow / "tech-lead"
-        tech_lead.mkdir()
-        consultation = tech_lead / "input-boundary.md"
-        consultation.write_text("# Tech Lead相談\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "tl-request",
-                "--task-dir",
-                str(self.fixture.task),
-                "--consultation-file",
-                str(consultation),
-                "--summary",
-                "入力境界を決める",
-            )[0],
-            0,
-        )
-        code, output, error = self.invoke(
-            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("$tl", output)
-        self.assertIn(str(consultation), output)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "tl", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        decision = tech_lead / "input-boundary-decision.md"
-        decision.write_text("# Tech Lead判断\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "tl-complete",
-                "--task-dir",
-                str(self.fixture.task),
-                "--decision-file",
-                str(decision),
-            )[0],
-            0,
-        )
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "planning")
-
-    def test_commit_must_match_pm_accepted_candidate(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-        self.make_handoff()
-        target = self.fixture.root / "src" / "profile.py"
-        target.write_text("NAME = 'accepted'\n", encoding="utf-8")
-        self.assertEqual(self.invoke("submit", "--task-dir", str(self.fixture.task))[0], 0)
-        (self.fixture.task / "implementation-review.md").write_text("# PM確認\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke("pm-review", "--task-dir", str(self.fixture.task), "--result", "accept")[0],
-            0,
-        )
-        target.write_text("NAME = 'changed-after-accept'\n", encoding="utf-8")
-        self.fixture.git("add", "src/profile.py")
-        self.fixture.git("commit", "-m", "changed candidate")
-        head = self.fixture.git("rev-parse", "HEAD")
-        code, _, error = self.invoke(
-            "commit-recorded", "--task-dir", str(self.fixture.task), "--head", head
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("PM承認済み候補差分と一致しません", error)
-
-    def test_pm_cannot_accept_formal_doc_outside_locked_paths(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-        self.make_handoff()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        self.assertEqual(self.invoke("submit", "--task-dir", str(self.fixture.task))[0], 0)
-        (self.fixture.task / "implementation-review.md").write_text("# PM確認\n", encoding="utf-8")
-        (self.fixture.root / "README.md").write_text("# 未承認の正式文書\n", encoding="utf-8")
-        code, _, error = self.invoke(
-            "pm-review", "--task-dir", str(self.fixture.task), "--result", "accept"
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("変更パス外の正式ドキュメント", error)
-
-    def test_complete_two_audit_lifecycle_and_metrics(self) -> None:
-        self.lock_and_init()
-        self.assertEqual(self.invoke("instruction-ready", "--task-dir", str(self.fixture.task))[0], 0)
-        self.assertEqual(
-            self.invoke("role-start", "--role", "implementer", "--task-dir", str(self.fixture.task))[0],
-            0,
-        )
-        self.complete_lightweight_preflight()
-        self.make_handoff()
-        (self.fixture.root / "src" / "profile.py").write_text("NAME = 'after'\n", encoding="utf-8")
-        code, _, error = self.invoke("submit", "--task-dir", str(self.fixture.task))
-        self.assertEqual(code, 0, error)
-        (self.fixture.task / "implementation-review.md").write_text("# PM確認\n\n判定: コミット可\n", encoding="utf-8")
-        code, _, error = self.invoke(
-            "pm-review", "--task-dir", str(self.fixture.task), "--result", "accept"
-        )
-        self.assertEqual(code, 0, error)
-        self.fixture.git("add", "src/profile.py")
-        self.fixture.git("commit", "-m", "update profile")
-        head = self.fixture.git("rev-parse", "HEAD")
-        code, _, error = self.invoke(
-            "commit-recorded", "--task-dir", str(self.fixture.task), "--head", head
-        )
-        self.assertEqual(code, 0, error)
-        (self.fixture.task / "audit-request.md").write_text(
-            "\n".join(
-                (
-                    "# 監査依頼",
-                    "",
-                    self.base,
-                    head,
-                    f"git diff {self.base}..{head}",
-                    "report.md summary.md loop-state.md implementation-review.md",
-                    "src/profile.py",
-                    "audit-codex.md audit-claude.md",
-                    "",
-                )
-            ),
-            encoding="utf-8",
-        )
-        self.assertEqual(self.invoke("audit-ready", "--task-dir", str(self.fixture.task))[0], 0)
-
-        with self.assertRaisesRegex(flowctl.FlowError, "provider=codex"):
-            flowctl.start_audit(
-                self.fixture.task,
-                "codex",
-                provider="claude",
-                session_id="codex-independent-session",
-            )
-        with self.assertRaisesRegex(flowctl.FlowError, "session ID"):
-            flowctl.start_audit(self.fixture.task, "codex", provider="codex", session_id=None)
-
-        for auditor in ("codex", "claude"):
-            if auditor == "claude":
-                with self.assertRaisesRegex(flowctl.FlowError, "同じ独立セッション"):
-                    flowctl.start_audit(
-                        self.fixture.task,
-                        "claude",
-                        provider="claude",
-                        session_id="codex-independent-session",
-                    )
-            with lib.task_lock(self.fixture.task):
-                flowctl.start_audit(
-                    self.fixture.task,
-                    auditor,
-                    provider=auditor,
-                    session_id=f"{auditor}-independent-session",
-                )
-            result_file = self.fixture.task / f"audit-{auditor}.md"
-            result_file.write_text("# 監査\n\n監査結果: クローズ可\n", encoding="utf-8")
-            if auditor == "codex":
-                wrong_file = self.fixture.task / "wrong-audit.md"
-                wrong_file.write_text("# 監査\n\n監査結果: クローズ可\n", encoding="utf-8")
-                code, _, error = self.invoke(
-                    "audit-result",
-                    "--task-dir",
-                    str(self.fixture.task),
-                    "--auditor",
-                    auditor,
-                    "--file",
-                    str(wrong_file),
-                )
-                self.assertEqual(code, 1)
-                self.assertIn("指定task", error)
-                request = self.fixture.task / "audit-request.md"
-                original_request = request.read_text(encoding="utf-8")
-                request.write_text(original_request + "\n変更\n", encoding="utf-8")
-                code, _, error = self.invoke(
-                    "audit-result",
-                    "--task-dir",
-                    str(self.fixture.task),
-                    "--auditor",
-                    auditor,
-                    "--file",
-                    str(result_file),
-                )
-                self.assertEqual(code, 1)
-                self.assertIn("audit-request.mdが変更", error)
-                request.write_text(original_request, encoding="utf-8")
-            code, _, error = self.invoke(
-                "audit-result",
-                "--task-dir",
-                str(self.fixture.task),
-                "--auditor",
-                auditor,
-                "--file",
-                str(result_file),
-            )
-            self.assertEqual(code, 0, error)
-        self.assertEqual(lib.current_state(lib.load_events(self.fixture.task)), "audit_triage")
-        (self.fixture.task / "audit-triage.md").write_text("# 監査整理\n\n今すぐ直すべきもの: なし\n", encoding="utf-8")
-        self.assertEqual(
-            self.invoke(
-                "triage",
-                "--task-dir",
-                str(self.fixture.task),
-                "--result",
-                "recommend-close",
-            )[0],
-            0,
-        )
-        code, output, error = self.invoke(
-            "next", "--task-dir", str(self.fixture.task), "--provider", "codex"
-        )
-        self.assertEqual(code, 0, error)
-        self.assertIn("~/.ai-devteam/bin/flowctl close \\", output)
-        self.assertIn(f"  --task-dir {self.fixture.task.resolve()} \\", output)
-        self.assertIn("  --owner-confirmed", output)
-        self.assertEqual(
-            self.invoke("close", "--task-dir", str(self.fixture.task), "--owner-confirmed")[0],
-            0,
-        )
-        metrics = lib.calculate_metrics(self.fixture.task)
-        self.assertTrue(metrics["first_audit_pass"])
-        self.assertEqual(metrics["pm_returns"], 0)
-        self.assertEqual(metrics["session_count"], 0)
-        self.assertGreaterEqual(metrics["unmeasured_session_starts"], 1)
-        self.assertIn("概算", metrics["timing_quality"])
-
-
-class GuardTest(unittest.TestCase):
-    def test_role_write_ownership(self) -> None:
-        policy = {"allowed_write_globs": ["src/**", "tests/**"], "formal_doc_globs": [], "generated_doc_globs": []}
-        self.assertIsNone(lib.check_write_path("implementer", "src/app.py", policy))
-        self.assertIn("PM所有", lib.check_write_path("implementer", "README.md", policy) or "")
-        self.assertIsNone(lib.check_write_path("pm", "README.md", policy))
-        self.assertIn("プロダクトコード", lib.check_write_path("pm", "src/app.py", policy) or "")
-        self.assertIsNone(lib.check_write_path("auditor-codex", "docs/flow/x/task-01/audit-codex.md", policy))
-        self.assertIsNotNone(lib.check_write_path("auditor-codex", "docs/flow/x/task-01/report.md", policy))
-        self.assertIn("品質ゲート", lib.check_write_path("implementer", "src/app.py", {"allowed_write_globs": []}) or "")
-
-    def test_write_guard_is_bound_to_project_and_associated_task(self) -> None:
-        fixture = RepoFixture()
-        fixture.setup()
-        policy = {
-            "allowed_write_globs": ["src/**", "tests/**"],
-            "scope_requirement": {"write_globs": ["src/**", "tests/**"]},
-            "formal_doc_globs": [],
-            "generated_doc_globs": [],
+    def hook(self, session: str, tool: str, value: dict) -> object:
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "cwd": str(self.fixture.root),
+            "tool_name": tool,
+            "tool_input": value,
         }
-        self.assertIn(
-            "プロジェクト外",
-            lib.check_write_path(
-                "pm", "/private/tmp/README.md", policy, fixture.root, fixture.task
-            )
-            or "",
+        with mock.patch.object(Path, "home", return_value=self.fake_home):
+            return lib.handle_hook(payload, "codex")
+
+    def role_start(self, session: str, role: str, task: Path | None = None) -> object:
+        selected = task or self.fixture.task
+        command = (
+            f"{self.fake_home}/.ai-devteam/bin/flowctl role-start "
+            f"--role {role} --task-dir {selected}"
         )
-        self.assertIn(
-            "関連付けたtask",
-            lib.check_write_path(
+        return self.hook(session, "Bash", {"command": command})
+
+    def patch(self, relative: str) -> dict:
+        return {"command": f"*** Begin Patch\n*** Update File: {relative}\n*** End Patch"}
+
+    def test_natural_instruction_and_package_script_do_not_need_a_permission_token(self) -> None:
+        self.assertIsNone(self.role_start("implementer", "implementer"))
+        self.assertIsNone(self.hook("implementer", "apply_patch", self.patch("src/profile.py")))
+        self.assertIsNone(
+            self.hook(
                 "implementer",
-                "docs/flow/profile/task-02/report.md",
-                policy,
-                fixture.root,
-                fixture.task,
-            )
-            or "",
-        )
-        self.assertIn(
-            "関連付けたtask",
-            lib.check_write_path(
-                "auditor-codex",
-                "docs/flow/profile/task-02/audit-codex.md",
-                policy,
-                fixture.root,
-                fixture.task,
-            )
-            or "",
-        )
-        self.assertIsNone(
-            lib.check_write_path(
-                "pm", "docs/flow/profile/spec.md", policy, fixture.root, fixture.task
+                "Write",
+                {"file_path": str(self.fixture.root / "package.json"), "content": "{}\n"},
             )
         )
-        self.assertIn(
-            "固定済み変更パス外",
-            lib.check_write_path("pm", "README.md", policy, fixture.root, fixture.task) or "",
-        )
-        fixture.close()
+        (self.fixture.task / "instruction.md").write_text("自由な文章だけの更新\n", encoding="utf-8")
+        self.assertIsNone(self.hook("implementer", "apply_patch", self.patch("src/profile.py")))
+        policy = lib.document_policy(self.fixture.task)
+        self.assertTrue(policy["instruction_exists"])
+        self.assertEqual(lib.parse_instruction(self.fixture.task, {}), ([], []))
 
-    def test_role_state_and_flowctl_command_guards(self) -> None:
-        fixture = RepoFixture()
-        base = fixture.setup()
-        scope_lock = {
-            "schema_version": 1,
-            "active": True,
-            "scope_file": "docs/flow/profile/scope-baseline.md",
-            "sha256": lib.sha256_file(fixture.scope),
-            "requirements": lib.parse_scope_baseline(fixture.scope)[0],
-            "audit_count": 2,
+    def test_only_actual_safety_boundaries_block_implementer(self) -> None:
+        self.assertIsNone(self.role_start("implementer", "implementer"))
+        for path in ("README.md", ".env", ".git/config", "docs/flow/profile/task-01/instruction.md"):
+            with self.subTest(path=path):
+                denied = self.hook("implementer", "apply_patch", self.patch(path))
+                self.assertIsNotNone(denied)
+        self.assertIsNone(lib.check_bash_command("npm install", "implementer", set()))
+        self.assertIsNone(lib.check_bash_command("npx prisma migrate dev --name add_profile", "implementer", set()))
+        self.assertIsNone(lib.check_bash_command("curl -fsS https://example.invalid/health", "implementer", set()))
+        for command in (
+            "git commit -m test",
+            "curl -X POST https://example.invalid/api",
+            "npm publish",
+            "kubectl apply -f deployment.yaml",
+            "printf value > output.txt",
+            "cat .env.local",
+            "npm run deploy -- --environment production",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(lib.check_bash_command(command, "implementer", set()))
+
+    def test_retired_approval_commands_do_not_mutate_or_authorize(self) -> None:
+        before = list(self.fixture.task.rglob("*"))
+        code, output, error = self.invoke(
+            "approve", "--task-dir", str(self.fixture.task), "--capability", "dependency-install", "--owner-confirmed"
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("廃止済み", output)
+        self.assertFalse((self.fixture.task / ".ai-devteam").exists())
+        self.assertEqual(before, list(self.fixture.task.rglob("*")))
+        code, output, error = self.invoke("validate", "--task-dir", str(self.fixture.task))
+        self.assertEqual(code, 0, error)
+        self.assertIn("実装可否のゲートではありません", output)
+
+    def test_owner_can_turn_an_audit_into_same_conversation_pm_and_implementation(self) -> None:
+        self.assertIsNone(self.role_start("audit", "auditor-codex"))
+        self.assertIsNone(self.role_start("audit", "owner-directed"))
+        with mock.patch.object(Path, "home", return_value=self.fake_home):
+            record = lib.load_runtime_session("codex", "audit")
+        self.assertEqual(record["role"], "owner-directed")
+        self.assertEqual(record["role_handoff"]["from_role"], "auditor-codex")
+        self.assertFalse(record["role_handoff"]["counts_as_independent_audit"])
+        self.assertIsNone(self.hook("audit", "apply_patch", self.patch("src/profile.py")))
+        self.assertIsNone(self.hook("audit", "apply_patch", self.patch("README.md")))
+        self.assertIsNone(
+            self.hook("audit", "apply_patch", self.patch("docs/flow/profile/task-01/instruction.md"))
+        )
+        denied = self.hook("audit", "Bash", {"command": "curl -X POST https://example.invalid/api"})
+        self.assertIsNotNone(denied)
+
+    def test_owner_can_turn_pm_into_same_conversation_implementation(self) -> None:
+        self.assertIsNone(self.role_start("pm-direct", "pm"))
+        self.assertIsNone(self.role_start("pm-direct", "owner-directed"))
+        with mock.patch.object(Path, "home", return_value=self.fake_home):
+            record = lib.load_runtime_session("codex", "pm-direct")
+        self.assertEqual(record["role"], "owner-directed")
+        self.assertEqual(record["role_handoff"]["from_role"], "pm")
+        self.assertIsNone(self.hook("pm-direct", "apply_patch", self.patch("src/profile.py")))
+
+    def test_pm_cannot_create_product_or_temporary_diagnostic_files(self) -> None:
+        self.assertIsNone(self.role_start("pm-diagnose", "pm"))
+        self.assertIsNotNone(self.hook("pm-diagnose", "apply_patch", self.patch("src/diagnose.ts")))
+        self.assertIsNotNone(
+            self.hook(
+                "pm-diagnose",
+                "Write",
+                {"file_path": "/private/tmp/pm-diagnose.ts", "content": "export {}\n"},
+            )
+        )
+
+    def test_owner_directed_transfer_cannot_switch_to_a_different_task(self) -> None:
+        second = self.fixture.flow / "task-02"
+        second.mkdir()
+        (second / "instruction.md").write_text("# another\n", encoding="utf-8")
+        self.assertIsNotNone(self.role_start("direct", "owner-directed"))
+        self.assertIsNone(self.role_start("audit", "auditor-codex"))
+        denied = self.role_start("audit", "owner-directed", second)
+        self.assertIsNotNone(denied)
+        self.assertIn("役割変更", denied["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_normal_role_ownership_and_independent_audit_boundaries_remain(self) -> None:
+        self.assertIsNone(self.role_start("pm", "pm"))
+        self.assertIsNotNone(self.hook("pm", "apply_patch", self.patch("src/profile.py")))
+        self.assertIsNone(self.hook("pm", "apply_patch", self.patch("README.md")))
+        self.assertIsNone(self.role_start("audit", "auditor-codex"))
+        self.assertIsNone(
+            self.hook("audit", "apply_patch", self.patch("docs/flow/profile/task-01/audit-codex-safety.md"))
+        )
+        self.assertIsNotNone(self.hook("audit", "apply_patch", self.patch("src/profile.py")))
+        self.assertIsNotNone(
+            self.hook("audit", "apply_patch", self.patch("docs/flow/profile/task-01/audit-claude-safety.md"))
+        )
+
+    def test_auditor_cannot_impersonate_the_other_provider(self) -> None:
+        self.assertIsNone(self.role_start("audit", "auditor-codex"))
+        denied = self.role_start("audit", "auditor-claude")
+        self.assertIsNotNone(denied)
+        self.assertIn("provider", denied["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_roleless_sessions_are_unmodified_until_explicit_start(self) -> None:
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "ordinary",
+            "cwd": str(self.fixture.root),
+            "tool_name": "apply_patch",
+            "tool_input": self.patch("src/profile.py"),
         }
-        lib.atomic_write_json(lib.scope_lock_path(fixture.scope), scope_lock)
-        policy = {
-            "schema_version": 1,
-            "branch": "feature/profile",
-            "base_commit": base,
-            "allowed_write_globs": ["src/**"],
-        }
-        lib.task_meta_dir(fixture.task).mkdir(parents=True)
-        lib.save_policy(fixture.task, policy)
-        lib.append_event(fixture.task, "transition", role="pm", data={"from": None, "to": "implementation_preflight"})
-        self.assertIsNotNone(lib.check_role_write_state("implementer", fixture.task, "src/profile.py"))
-        self.assertIsNone(
-            lib.check_role_write_state(
-                "implementer", fixture.task, "docs/flow/profile/task-01/pre-summary.md"
-            )
-        )
-        self.assertEqual(lib.parse_flowctl_command("~/.ai-devteam/bin/flowctl pm-review --task-dir x"), "pm-review")
-        self.assertNotIn("pm-review", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
-        self.assertIn("preflight-complete", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
-        self.assertNotIn("recover-tooling", lib.ROLE_FLOWCTL_COMMANDS["pm"])
-        self.assertNotIn("recover-tooling", lib.ROLE_FLOWCTL_COMMANDS["implementer"])
-        self.assertNotIn("audit-start", lib.ROLE_FLOWCTL_COMMANDS["auditor-codex"])
-        fixture.close()
+        with mock.patch.object(Path, "home", return_value=self.fake_home):
+            self.assertIsNone(lib.handle_hook(payload, "codex"))
+        self.assertFalse(lib.runtime_session_path("codex", "ordinary").exists())
 
-    def test_auditor_tokens_use_the_role_skill(self) -> None:
-        self.assertEqual(flowctl.role_token("auditor-codex", "codex"), "$auditor")
-        self.assertEqual(flowctl.role_token("auditor-claude", "claude"), "/auditor")
+    def test_multiline_command_renderer_keeps_paths_copyable(self) -> None:
+        command = flowctl.flowctl_command_block(
+            "status",
+            [("--task-dir", "/tmp/project with spaces/docs/flow/task-01")],
+        )
+        self.assertIn("```sh", command)
+        self.assertIn("\\\n", command)
+        self.assertNotIn("scope-lock", command)
 
-    def test_command_guardrails(self) -> None:
-        self.assertIsNone(lib.check_bash_command("git commit -m normal", None, set()))
-        self.assertIsNone(lib.check_write_path(None, "README.md"))
-        self.assertIsNone(lib.check_external_tool("spawn_agent", None))
-        self.assertIn("オーナー", lib.check_bash_command("git commit -m test", "implementer", set()) or "")
-        self.assertIn("秘密情報", lib.check_bash_command("sed -n '1p' .env", "implementer", set()) or "")
-        self.assertIn("一時許可", lib.check_bash_command("npx prisma migrate dev", "implementer", set()) or "")
-        self.assertIsNone(
-            lib.check_bash_command(
-                "npx prisma migrate dev", "implementer", {"isolated-db", "migration"}
-            )
-        )
-        self.assertNotIn("close", lib.ROLE_FLOWCTL_COMMANDS["pm"])
-        self.assertIsNone(lib.check_bash_command("rg 'value > limit' src", "implementer", set()))
-        self.assertIn(
-            "直接ファイル変更",
-            lib.check_bash_command("printf value > output.txt", "implementer", set()) or "",
-        )
-        self.assertIn(
-            "直接ファイル変更",
-            lib.check_bash_command("mkdir generated", "implementer", set()) or "",
-        )
-        self.assertIn(
-            "git変更操作",
-            lib.check_bash_command("env git commit -m test", "implementer", set()) or "",
-        )
-        self.assertIn(
-            "インラインスクリプト",
-            lib.check_bash_command("python3 -B -c 'print(1)'", "implementer", set()) or "",
-        )
-
-    def test_dependency_writes_need_capability_but_migration_source_does_not(self) -> None:
-        self.assertIn(
-            "dependency-install",
-            lib.check_capability_write("implementer", "package.json", set()) or "",
-        )
-        self.assertIsNone(
-            lib.check_capability_write("implementer", "package.json", {"dependency-install"})
-        )
-        self.assertIsNone(
-            lib.check_capability_write(
-                "implementer",
-                "prisma/migrations/001_init/migration.sql",
-                set(),
-            )
-        )
-
-    def test_auditor_hook_cannot_register_the_other_auditor(self) -> None:
-        fixture = RepoFixture()
-        base = fixture.setup()
-        policy = {
-            "schema_version": 1,
-            "branch": "feature/profile",
-            "base_commit": base,
-            "allowed_write_globs": ["src/**"],
-        }
-        lib.task_meta_dir(fixture.task).mkdir(parents=True)
-        lib.save_policy(fixture.task, policy)
-        fake_home = fixture.root / "home"
-        with mock.patch.object(Path, "home", return_value=fake_home):
-            lib.save_runtime_session(
-                "codex",
-                "audit-session",
-                {
-                    "schema_version": 1,
-                    "provider": "codex",
-                    "session_id": "audit-session",
-                    "root": str(fixture.root),
-                    "role": "auditor-codex",
-                    "task_dir": str(fixture.task),
-                    "started_at": lib.iso_now(),
-                    "span_id": "span",
-                    "event_recorded": False,
-                },
-            )
-            result = lib.handle_hook(
-                {
-                    "hook_event_name": "PreToolUse",
-                    "session_id": "audit-session",
-                    "cwd": str(fixture.root),
-                    "tool_name": "Bash",
-                    "tool_input": {
-                        "command": (
-                            f"{fake_home}/.ai-devteam/bin/flowctl audit-result "
-                            f"--task-dir {fixture.task} --auditor claude --file audit-claude.md"
-                        )
-                    },
-                },
-                "codex",
-            )
-            self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
-            self.assertIn("codex監査だけ", result["hookSpecificOutput"]["permissionDecisionReason"])
-        fixture.close()
-
-    def test_hook_is_inactive_until_explicit_role_start(self) -> None:
-        fixture = RepoFixture()
-        fixture.setup()
-        fake_home = fixture.root / "home"
-        payload_start = {
-            "hook_event_name": "SessionStart",
-            "session_id": "session-1",
-            "cwd": str(fixture.root),
-        }
-        with mock.patch.object(Path, "home", return_value=fake_home):
-            self.assertIsNone(lib.handle_hook(payload_start, "codex"))
-            self.assertFalse(lib.runtime_session_path("codex", "session-1").exists())
-            self.assertIsNone(
-                lib.handle_hook(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "session_id": "session-1",
-                        "cwd": str(fixture.root),
-                        "tool_name": "apply_patch",
-                        "tool_input": {
-                            "command": "*** Begin Patch\n*** Update File: src/profile.py\n*** End Patch"
-                        },
-                    },
-                    "codex",
-                )
-            )
-            self.assertIsNone(
-                lib.handle_hook(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "session_id": "session-1",
-                        "cwd": str(fixture.root),
-                        "tool_name": "Bash",
-                        "tool_input": {"command": "git commit -m normal-session"},
-                    },
-                    "codex",
-                )
-            )
-            self.assertIsNone(
-                lib.handle_hook(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "session_id": "session-1",
-                        "cwd": str(fixture.root),
-                        "tool_name": "Bash",
-                        "tool_input": {"command": "npm test"},
-                    },
-                    "codex",
-                )
-            )
-            self.assertIsNone(
-                lib.handle_hook(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "session_id": "session-1",
-                        "cwd": str(fixture.root),
-                        "tool_name": "spawn_agent",
-                        "tool_input": {"task": "通常セッション内の調査"},
-                    },
-                    "codex",
-                )
-            )
-            owner_operation = lib.handle_hook(
-                {
-                    "hook_event_name": "PreToolUse",
-                    "session_id": "session-1",
-                    "cwd": str(fixture.root),
-                    "tool_name": "Bash",
-                    "tool_input": {
-                        "command": (
-                            f"{fake_home}/.ai-devteam/bin/flowctl close "
-                            f"--task-dir {fixture.task} --owner-confirmed"
-                        )
-                    },
-                },
-                "codex",
-            )
-            self.assertEqual(owner_operation["hookSpecificOutput"]["permissionDecision"], "deny")
-            self.assertIn(
-                "オーナー",
-                owner_operation["hookSpecificOutput"]["permissionDecisionReason"],
-            )
-            role_command = f"{fake_home}/.ai-devteam/bin/flowctl role-start --role implementer --task-dir {fixture.task}"
-            self.assertIsNone(
-                lib.handle_hook(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "session_id": "session-1",
-                        "cwd": str(fixture.root),
-                        "tool_name": "Bash",
-                        "tool_input": {"command": role_command},
-                    },
-                    "codex",
-                )
-            )
-            self.assertEqual(
-                lib.load_runtime_session("codex", "session-1")["role"], "implementer"
-            )
-            formal = lib.handle_hook(
-                {
-                    "hook_event_name": "PreToolUse",
-                    "session_id": "session-1",
-                    "cwd": str(fixture.root),
-                    "tool_name": "apply_patch",
-                    "tool_input": {"command": "*** Begin Patch\n*** Update File: README.md\n*** End Patch"},
-                },
-                "codex",
-            )
-            self.assertEqual(formal["hookSpecificOutput"]["permissionDecision"], "deny")
-        fixture.close()
-
-    def test_skill_metadata_disables_implicit_invocation(self) -> None:
-        configs = sorted((REPO / "codex" / "skills").glob("*/agents/openai.yaml"))
-        self.assertTrue(configs)
-        for config in configs:
-            self.assertIn(
-                "allow_implicit_invocation: false",
-                config.read_text(encoding="utf-8"),
-            )
-        claude_skills = sorted((REPO / "claude" / "skills").glob("*/SKILL.md"))
-        self.assertTrue(claude_skills)
-        for skill in claude_skills:
+    def test_skill_metadata_keeps_roles_opt_in(self) -> None:
+        for config in (REPO / "codex" / "skills").glob("*/agents/openai.yaml"):
+            self.assertIn("allow_implicit_invocation: false", config.read_text(encoding="utf-8"))
+        for skill in (REPO / "claude" / "skills").glob("*/SKILL.md"):
             frontmatter = skill.read_text(encoding="utf-8").split("---", 2)[1]
             self.assertIn("disable-model-invocation: true", frontmatter)
-
-    def test_legacy_claude_guards_are_removed_with_backup(self) -> None:
-        self.assertEqual(len(lib.LEGACY_CLAUDE_GIT_DENIES), 27)
-        self.assertEqual(len(lib.LEGACY_CLAUDE_GIT_ALLOWS), 7)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / ".claude" / "settings.json"
-            config.parent.mkdir()
-            config.write_text(
-                json.dumps(
-                    {
-                        "_comment": "ai-devteamのプロジェクト用補助ガード。Git変更を拒否する。",
-                        "custom": {"preserved": True},
-                        "permissions": {
-                            "deny": ["Bash(git commit)", "Bash(custom dangerous command:*)"],
-                            "allow": ["Bash(git status:*)", "Bash(custom safe command:*)"],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                self.assertEqual(
-                    flowctl.main(
-                        ["remove-legacy-claude-guards", "--project-root", str(root)]
-                    ),
-                    1,
-                )
-            self.assertIn("owner-confirmed", stderr.getvalue())
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                self.assertEqual(
-                    flowctl.main(
-                        [
-                            "remove-legacy-claude-guards",
-                            "--project-root",
-                            str(root),
-                            "--owner-confirmed",
-                        ]
-                    ),
-                    0,
-                )
-            value = json.loads(config.read_text(encoding="utf-8"))
-            self.assertEqual(value["custom"], {"preserved": True})
-            self.assertEqual(
-                value["permissions"]["deny"], ["Bash(custom dangerous command:*)"]
-            )
-            self.assertEqual(
-                value["permissions"]["allow"], ["Bash(custom safe command:*)"]
-            )
-            backups = list(config.parent.glob("settings.json.ai-devteam-opt-in-backup-*"))
-            self.assertEqual(len(backups), 1)
-
-    def test_hook_install_preserves_existing_settings(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            config = Path(directory) / "settings.json"
-            config.write_text(json.dumps({"permissions": {"deny": ["Bash(git push:*)"]}}), encoding="utf-8")
-            changed, backup = lib.install_hooks("claude", SCRIPTS / "flowctl.py", config)
-            self.assertTrue(changed)
-            self.assertIsNotNone(backup)
-            value = json.loads(config.read_text(encoding="utf-8"))
-            self.assertEqual(value["permissions"]["deny"], ["Bash(git push:*)"])
-            self.assertIn("PreToolUse", value["hooks"])
-            changed_again, _ = lib.install_hooks("claude", SCRIPTS / "flowctl.py", config)
-            self.assertFalse(changed_again)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # codex-devteam のテンプレ一式をローカル環境へ配備する
 # - codex/skills/*  → ~/.agents/skills/   (Codexの $pm $tl $implementer $auditor)
 # - claude/skills/* → ~/.claude/skills/   (Claude Codeの監査Skill /auditor)
-# - scripts/flowctl* → ~/.ai-devteam/bin/ (工程状態・ガード・自動指標)
+# - scripts/flowctl* → ~/.ai-devteam/bin/ (役割・安全ガード、旧履歴の参照)
 # - Codex/Claude lifecycle hooks（既存JSONを保持してマージ）
 # テンプレを改訂したら、このスクリプトを再実行して反映する
 set -eu
@@ -10,8 +10,7 @@ set -eu
 repo_dir=$(cd "$(dirname "$0")/.." && pwd)
 
 python3 -B -m unittest discover -s "$repo_dir/tests" >/dev/null
-python3 -B "$repo_dir/codex/skills/pm/scripts/validate_handoff.py" --self-test >/dev/null
-echo "verified: flowctl regression tests and handoff validator"
+echo "verified: flowctl regression tests"
 
 mkdir -p "$HOME/.agents/skills"
 if [ -d "$HOME/.agents/skills/tech-lead" ]; then
@@ -33,9 +32,11 @@ runtime_dir="$HOME/.ai-devteam/bin"
 mkdir -p "$runtime_dir"
 cp "$repo_dir/scripts/flowctl.py" "$runtime_dir/flowctl"
 cp "$repo_dir/scripts/flowctl_lib.py" "$runtime_dir/flowctl_lib.py"
-cp "$repo_dir/codex/skills/pm/scripts/validate_handoff.py" "$runtime_dir/validate_handoff.py"
-chmod 755 "$runtime_dir/flowctl" "$runtime_dir/flowctl_lib.py" "$runtime_dir/validate_handoff.py"
+rm -f "$runtime_dir/validate_handoff.py"
+chmod 755 "$runtime_dir/flowctl" "$runtime_dir/flowctl_lib.py"
 echo "installed: flowctl runtime -> ~/.ai-devteam/bin/"
+echo "removed: obsolete handoff format validator"
+echo "note: workflow approval/state-sync commands are retired; existing task history is preserved and is not an execution gate"
 
 mkdir -p "$HOME/.codex"
 for profile in "$repo_dir"/codex/profiles/*.config.toml; do
