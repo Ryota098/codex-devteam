@@ -97,6 +97,29 @@ class DocumentWorkflowTest(unittest.TestCase):
         self.assertIn("初回キャッチアップ", scenarios)
         self.assertIn("既存CLIのdry-run失敗", scenarios)
 
+    def test_role_skills_read_current_project_rules_and_do_not_replace_formal_sessions(self) -> None:
+        rules = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("呼び名が`task10_builder_impl`", rules)
+        self.assertIn("正式役割の代行であり禁止", rules)
+        self.assertIn("PMは実装、監査、TL判断を目的とするサブエージェントを起動しない", rules)
+
+        expected_rules = {
+            "codex/skills/pm/SKILL.md": "`AGENTS.md`を全文確認",
+            "codex/skills/tl/SKILL.md": "`AGENTS.md`を全文確認",
+            "codex/skills/implementer/SKILL.md": "`AGENTS.md`を全文確認",
+            "codex/skills/auditor/SKILL.md": "`AGENTS.md`を全文確認",
+            "claude/skills/auditor/SKILL.md": "`CLAUDE.md`を全文確認",
+        }
+        for relative_path, marker in expected_rules.items():
+            skill = (REPO / relative_path).read_text(encoding="utf-8")
+            self.assertIn(marker, skill)
+            self.assertIn("自動読込みだけを根拠に省略しない", skill)
+        pm = (REPO / "codex" / "skills" / "pm" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Builder実装担当", pm)
+        self.assertIn("`role-start`を使わない", pm)
+        scenarios = (REPO / "tests" / "pm-scenarios.md").read_text(encoding="utf-8")
+        self.assertIn("PMによる正式役割の子起動", scenarios)
+
 
 if __name__ == "__main__":
     unittest.main()

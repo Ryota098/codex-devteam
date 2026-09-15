@@ -57,8 +57,7 @@ done
 
 echo "note: restart sessions only if lifecycle hook configuration was added or changed; otherwise reread the updated common rules and current role Skill in the existing session"
 echo "note: ai-devteam is opt-in; roleless sessions stay normal until an explicit Skill runs flowctl role-start"
-echo "note: existing projects are not rewritten; replace each project's AGENTS.md with $repo_dir/AGENTS.md when common rules change"
-echo "note: run ~/.ai-devteam/bin/flowctl diagnose --project-root <project> after replacing AGENTS.md"
-echo "note: if diagnose finds legacy Claude Git permissions, the owner can run flowctl remove-legacy-claude-guards with --owner-confirmed"
+echo "note: existing projects are not rewritten; copy $repo_dir/AGENTS.md to each Codex project and the matching CLAUDE.md to each Claude project when common rules change"
+echo "note: new role Skills explicitly reread the matching project rule; existing sessions need one reread but no restart unless hook settings changed"
 echo "note: Codex permission profiles are optional hardening; legacy sandbox_mode in ~/.codex/config.toml takes precedence and disables them"
 echo "done"
