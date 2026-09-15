@@ -107,7 +107,7 @@ class DocumentWorkflowTest(unittest.TestCase):
 
     def test_role_skills_read_project_rules_and_do_not_replace_formal_sessions(self) -> None:
         rules = RULES.read_text(encoding="utf-8")
-        self.assertIn("呼び名が`task10_builder_impl`", rules)
+        self.assertIn("呼び名が`feature_impl`", rules)
         self.assertIn("正式役割の代行であり禁止", rules)
         self.assertIn("PMは実装、監査、TL判断を目的とするサブエージェントを起動しない", rules)
 
@@ -139,6 +139,45 @@ class DocumentWorkflowTest(unittest.TestCase):
         self.assertIn("フルテストはリリース前の定例儀式ではない", delivery)
         self.assertIn("初回キャッチアップ", scenarios)
         self.assertIn("既存CLIのdry-run失敗", scenarios)
+
+    def test_results_always_include_an_immediate_handoff(self) -> None:
+        rules = RULES.read_text(encoding="utf-8")
+        pm = (REPO / "codex" / "skills" / "pm" / "SKILL.md").read_text(encoding="utf-8")
+        implementer = (REPO / "codex" / "skills" / "implementer" / "SKILL.md").read_text(encoding="utf-8")
+        scenarios = (REPO / "tests" / "pm-scenarios.md").read_text(encoding="utf-8")
+
+        self.assertIn("即時次アクション", rules)
+        self.assertIn("工程の全体計画や将来の順番は", rules)
+        self.assertIn("同じ既存実装担当へ渡す", pm)
+        self.assertIn("複数文書へ複製してから実装へ渡すことを開始条件にしない", pm)
+        self.assertIn("最終応答の末尾に`即時次アクション: 既存PMセッションへ`", implementer)
+        for relative_path in ("codex/skills/auditor/SKILL.md", "claude/skills/auditor/SKILL.md"):
+            auditor = (REPO / relative_path).read_text(encoding="utf-8")
+            self.assertIn("既存PMセッションへそのまま送れる短いコードブロック", auditor)
+            self.assertIn("provider hook、工程状態、書式、ファイル名を開始阻害として挙げない", auditor)
+            self.assertNotIn("監査結果（基本は", auditor)
+        self.assertIn("監査是正の即時handoff", scenarios)
+        self.assertIn("監査結果の即時次アクション", scenarios)
+
+    def test_distributed_rules_are_product_neutral(self) -> None:
+        documents = [RULES, REPO / "README.md"]
+        documents.extend((REPO / "codex" / "skills").rglob("*.md"))
+        documents.extend((REPO / "claude" / "skills").rglob("*.md"))
+        current_project_markers = (
+            "h" + "anamii",
+            "project-" + "lifecycle",
+            "task" + "-10",
+            "c" + "addy",
+            "xml" + "rpc",
+            "app" + "run",
+            "sa" + "kura",
+            "front" + "end",
+            "build" + "er",
+        )
+        for document in documents:
+            text = document.read_text(encoding="utf-8").lower()
+            for marker in current_project_markers:
+                self.assertNotIn(marker, text, document)
 
 
 if __name__ == "__main__":
