@@ -1,3 +1,3 @@
 {
-  "_comment": "ai-devteamは明示起動方式です。通常セッションへ影響する静的permission denyは置かず、role-start後のflowctlフックで役割制御します。既存settings.jsonはこの雛形で上書きしないでください"
+  "_comment": "ai-devteamは明示起動方式です。通常セッションへ影響する静的permission denyや工程hookは置きません。既存settings.jsonはこの雛形で上書きしないでください"
 }
