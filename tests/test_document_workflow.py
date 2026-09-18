@@ -179,6 +179,17 @@ class DocumentWorkflowTest(unittest.TestCase):
             for marker in current_project_markers:
                 self.assertNotIn(marker, text, document)
 
+    def test_markdown_quote_blocks_are_not_used_for_handoffs(self) -> None:
+        documents = [RULES, REPO / "README.md"]
+        documents.extend((REPO / "codex" / "skills").rglob("*.md"))
+        documents.extend((REPO / "claude" / "skills").rglob("*.md"))
+        quote_marker = chr(62)
+
+        self.assertIn("Markdownの引用ブロック", RULES.read_text(encoding="utf-8"))
+        for document in documents:
+            for line in document.read_text(encoding="utf-8").splitlines():
+                self.assertFalse(line.lstrip().startswith(quote_marker), f"Markdown quote in {document}: {line}")
+
 
 if __name__ == "__main__":
     unittest.main()
